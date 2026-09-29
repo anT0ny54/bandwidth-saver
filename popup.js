@@ -16,7 +16,7 @@ const excludeBtn  = $("excludeBtn");
 const settingsBtn = $("settingsBtn");
 const presetBtns  = Array.from(document.querySelectorAll("#qualityPresets .preset"));
 
-const PRESETS = [20, 40, 80];
+const PRESETS = [45, 60, 80];
 
 let currentHost  = "";
 let currentIsWeb = false;
@@ -97,10 +97,15 @@ grayscaleEl.addEventListener("change", async () => {
 
 presetBtns.forEach(btn => {
   btn.addEventListener("click", async () => {
+    const quality = Number(btn.dataset.q);
     presetBtns.forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
-    await chrome.storage.sync.set({ quality: Number(btn.dataset.q) });
-    showNudge();
+    await chrome.storage.sync.set({ quality });
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab?.id) await chrome.tabs.reload(tab.id);
+    } catch {}
+    window.close();
   });
 });
 

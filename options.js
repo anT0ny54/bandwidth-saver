@@ -18,8 +18,8 @@ const customWidthEl   = $("customWidth");
 const qualityPresets = Array.from(document.querySelectorAll("#qualityPresets .preset"));
 const widthPresets   = Array.from(document.querySelectorAll("#widthPresets  .preset"));
 
-const QUALITY_PRESETS = [20, 40, 80];
-const WIDTH_PRESETS   = [1280, 1920, 0];
+const QUALITY_PRESETS = [45, 60, 80];
+const WIDTH_PRESETS   = [768, 1024, 0];
 
 if (versionEl) {
   versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
@@ -43,6 +43,25 @@ function fmtBytes(n) {
   if (n >= 1 << 20) return (n / (1 << 20)).toFixed(2) + " MB";
   if (n >= 1 << 10) return (n / (1 << 10)).toFixed(2) + " KB";
   return n + " B";
+}
+
+async function reloadCurrentPage() {
+  const isHttpUrl = url => /^https?:\/\//i.test(String(url || ""));
+  try {
+    const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (active?.id && isHttpUrl(active.url)) {
+      await chrome.tabs.reload(active.id);
+      return;
+    }
+
+    // When settings are opened in a new tab, the settings tab itself is active.
+    // Prefer the most recently accessed HTTP(S) tab in the same window.
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const page = tabs
+      .filter(tab => tab.id != null && isHttpUrl(tab.url))
+      .sort((a, b) => Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0))[0];
+    if (page?.id) await chrome.tabs.reload(page.id);
+  } catch {}
 }
 
 // ── Preset helpers ────────────────────────────────────────────────────────────
@@ -159,11 +178,20 @@ grayscaleEl.addEventListener("change", async () => {
 // ── Save ──────────────────────────────────────────────────────────────────────
 
 async function save() {
+  const quality = readQuality();
+  const maxWidth = readWidth();
+  const excludeDomains = (excludeEl.value || "").trim();
+  const current = await chrome.storage.sync.get(DEFAULTS);
+
   await chrome.storage.sync.set({
-    quality:        readQuality(),
-    maxWidth:       readWidth(),
-    excludeDomains: (excludeEl.value || "").trim(),
+    quality,
+    maxWidth,
+    excludeDomains,
   });
+
+  if (quality !== Number(current.quality ?? DEFAULTS.quality)) {
+    await reloadCurrentPage();
+  }
 
   showToast("Saved", "ok");
 }

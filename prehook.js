@@ -7,8 +7,8 @@
   const WSRV_PROXY = "https://wsrv.nl/";
   // Minimal fallback used only when the local settings mirror is unavailable.
   const defaults = {
-    enabled: true, proxyBase: WSRV_PROXY, quality: 40, grayscale: true,
-    maxWidth: 1280, excludeDomains: "google.com gstatic.com"
+    enabled: true, proxyBase: WSRV_PROXY, quality: 60, grayscale: true,
+    maxWidth: 768, excludeDomains: "google.com gstatic.com"
   };
 
   let opts = null;        // loaded options (null until storage responds)
@@ -46,7 +46,7 @@
     opts = next;
     const base = String(opts.proxyBase || "").trim();
     if (!base) { proxyConfig = null; return; }
-    const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 40) || 40));
+    const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 60) || 60));
     const maxWidth = Number(opts.maxWidth) || 0;
     proxyConfig = { base, sep: base.includes("?") ? "&" : "?", quality,
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
@@ -63,7 +63,7 @@
 
     if (maxWidth) {
       // Preserve aspect ratio and never enlarge smaller images.
-      parts.push("w=" + maxWidth, "fit=inside", "we");
+      parts.push("w=" + maxWidth, "fit=inside", "we=1", "dpr=2");
     }
 
     if (grayscale) {

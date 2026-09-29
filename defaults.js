@@ -4,13 +4,13 @@
 //
 // Defaults mirror the original extension (ayastreb/bandwidth-hero):
 //   convertBw: true  → grayscale: true
-//   compressionLevel: 40 → quality: 40
+//   Normal quality preset: 60
 
 export const DEFAULTS = {
   enabled:        true,
   proxyBase:      "https://wsrv.nl/",
-  quality:        40,    // matches original compressionLevel default
+  quality:        60,    // Normal preset
   grayscale:      true,  // matches original convertBw: true — grayscale ON by default
-  maxWidth:       1280,  // 0 = no limit; MV3-specific addition
+  maxWidth:       768,  // HD preset; 0 = no limit
   excludeDomains: "google.com gstatic.com",
 };

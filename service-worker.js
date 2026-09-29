@@ -26,9 +26,9 @@ const WSRV_PROXY = "https://wsrv.nl/";
 const DEFAULTS = {
   enabled:         true,
   proxyBase:       "https://wsrv.nl/",
-  quality:         40,
+  quality:         60,
   grayscale:       true,
-  maxWidth:        1280,
+  maxWidth:        768,
   excludeDomains:  "google.com gstatic.com",
 };
 

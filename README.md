@@ -11,8 +11,8 @@ It is designed to work conservatively: image interception happens early, while b
 ## ✨ Features
 
 - **Image proxying** — routes eligible remote images through an image optimization proxy.
-- **Quality control** — configurable image quality.
-- **Maximum width** — optionally limits oversized images before delivery.
+- **Quality control** — Small (45), Normal (60), or Sharp (80), with optional custom quality.
+- **Maximum width** — HD (768 px), Full HD (1024 px), or no limit, with optional custom width.
 - **Grayscale mode** — optionally requests grayscale images through the proxy.
 - **WebP output** — eligible images are delivered as WebP for efficient transfer.
 - **Double-proxy protection** — already processed proxy URLs are never wrapped again.
@@ -26,6 +26,23 @@ It is designed to work conservatively: image interception happens early, while b
 - **Statistics batching** — reduces frequent storage writes.
 - **Configuration caching** — avoids repeatedly parsing the same proxy settings.
 - **Chromium compatibility** — designed for Chromium browsers supporting Manifest V3.
+
+### Default image settings
+
+```text
+Quality:       Normal — 60
+Max width:     HD — 768 px
+Output:        WebP
+Without enlargement: we=1
+Device pixel ratio:  dpr=2
+Browser cache: 1 day
+```
+
+A typical request is standardized as:
+
+```text
+https://wsrv.nl/?url=<encoded-source-url>&q=60&w=768&fit=inside&we=1&dpr=2&maxage=1d&page=-1&n=-1&output=webp
+```
 
 ---
 
@@ -64,7 +81,7 @@ Web page
    Browser
 ```
 
-Proxy requests use wsrv.nl's native `q`, `w`, `fit`, `we`, `filt`, `maxage`, `page`, `n`, and `output=webp` parameters.
+Proxy requests use a stable wsrv.nl parameter order: `url`, `q`, `w`, `fit`, `we=1`, `dpr=2`, optional `filt=greyscale`, `maxage=1d`, `page=-1`, `n=-1`, and `output=webp`. The source image URL is URL-encoded as required by wsrv.nl.
 
 The extension does **not** wait for an image to finish downloading before deciding whether to proxy it. This is important because waiting for `naturalWidth`, image load events, or similar information can defeat the purpose of bandwidth saving.
 

@@ -481,11 +481,11 @@
       <div class="card">
         <div class="row">
           <div class="presets" id="qualityPresets">
-            <button class="preset" data-q="20" type="button">
+            <button class="preset" data-q="45" type="button">
               <span class="p-label">Small</span>
               <span class="p-hint">Most saving</span>
             </button>
-            <button class="preset" data-q="40" type="button">
+            <button class="preset" data-q="60" type="button">
               <span class="p-label">Normal</span>
               <span class="p-hint">Balanced</span>
             </button>
@@ -504,13 +504,13 @@
       <div class="card">
         <div class="row">
           <div class="presets" id="widthPresets">
-            <button class="preset" data-w="1280" type="button">
+            <button class="preset" data-w="768" type="button">
               <span class="p-label">HD</span>
-              <span class="p-hint">1280 px</span>
+              <span class="p-hint">768 px</span>
             </button>
-            <button class="preset" data-w="1920" type="button">
+            <button class="preset" data-w="1024" type="button">
               <span class="p-label">Full HD</span>
-              <span class="p-hint">1920 px</span>
+              <span class="p-hint">1024 px</span>
             </button>
             <button class="preset" data-w="0" type="button">
               <span class="p-label">No limit</span>
@@ -529,7 +529,7 @@
           <div class="field-label">wsrv.nl</div>
           <div class="hint" style="margin-top:0">
             Images are rewritten to <code>https://wsrv.nl/</code> before download.
-            The original URL is sent with the selected quality, grayscale, and max-width options, then returned as WebP with 1-day browser caching.
+            The original URL is sent with the selected quality and max-width options, plus `we=1` and `dpr=2` when width limiting is enabled, then returned as WebP with 1-day browser caching. Grayscale is added only when enabled.
           </div>
           <div class="hint">
             <a href="https://wsrv.nl/docs/" target="_blank" rel="noopener noreferrer">Open wsrv.nl documentation</a>

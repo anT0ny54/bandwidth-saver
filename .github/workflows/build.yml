@@ -71,6 +71,6 @@ jobs:
             echo "Creating v${VERSION} release."
             gh release create "v${VERSION}" "$ZIP" \
               --target "$GITHUB_SHA" \
-              --title "Bandwidth Guardian v${VERSION}" \
+              --title "Bandwidth Saver v${VERSION}" \
               --generate-notes
           fi

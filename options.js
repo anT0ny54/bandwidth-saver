@@ -184,6 +184,17 @@ grayscaleEl.addEventListener("change", async () => {
 // ── Save ──────────────────────────────────────────────────────────────────────
 
 async function save() {
+  // Reject invalid custom values instead of silently falling back to a preset.
+  const cq = customQualityEl.value.trim();
+  const cw = customWidthEl.value.trim();
+  if (cq !== "" && !(/^\d+$/.test(cq) && +cq >= 1 && +cq <= 100)) {
+    showToast("Quality must be 1–100", "err");
+    return;
+  }
+  if (cw !== "" && !/^\d+$/.test(cw)) {
+    showToast("Width must be 0 or a positive number", "err");
+    return;
+  }
   const quality = readQuality();
   const maxWidth = readWidth();
   const excludeDomains = (excludeEl.value || "").trim();
@@ -201,6 +212,11 @@ async function save() {
     await reloadCurrentPage();
   }
 
+  // Keep the "restore on clear" values and preset highlights in step with storage.
+  savedQuality = quality;
+  savedWidth   = maxWidth;
+  setQualityUI(quality);
+  setWidthUI(maxWidth);
   showToast("Saved", "ok");
 }
 

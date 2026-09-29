@@ -1,6 +1,6 @@
-// Bandwidth Guardian — shared defaults
+// Bandwidth Saver — shared defaults
 // Single source of truth. service-worker.js, options.js, popup.js import this.
-// content.js and prehook.js inline a copy (search "KEEP IN SYNC").
+// content.js, prehook.js and service-worker.js inline a copy (search "KEEP IN SYNC").
 //
 // Defaults mirror the original extension (ayastreb/bandwidth-hero):
 //   convertBw: true  → grayscale: true

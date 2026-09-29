@@ -1,4 +1,4 @@
-// Bandwidth Guardian — content script
+// Bandwidth Saver — content script
 //
 // ══ ARCHITECTURE ══════════════════════════════════════════════════════════════
 //
@@ -38,9 +38,10 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 (function () {
-  // Fixed image proxy used by Bandwidth Guardian.
+  // Fixed image proxy used by Bandwidth Saver.
   const WSRV_PROXY = "https://wsrv.nl/";
   // Minimal fallback used only when the local settings mirror is unavailable.
+  // KEEP IN SYNC with defaults.js, prehook.js and service-worker.js.
   const DEFAULTS = {
     enabled: true, proxyBase: WSRV_PROXY, quality: 60, grayscale: true,
     maxWidth: 768, excludeDomains: "google.com gstatic.com"
@@ -55,29 +56,34 @@
 
   // Tracking pixel URL patterns (ported from original shouldCompress.js)
   // Catches tracking pixels by URL pattern, regardless of domain.
-  const TRACKING_PATTERNS = [
-    /pagead/i,
-    /(pixel|cleardot)\.*\.(gif|jpg|jpeg)/i,
-    /google\.([a-z.]+)\/(ads|generate_204|.*\/log204)+/i,
-    /google-analytics\.([a-z.]+)\/(r|collect)+/i,
-    /youtube\.([a-z.]+)\/(api|ptracking|player_204|live_204)+/i,
-    /doubleclick\.([a-z.]+)\/(pcs|pixel|r)+/i,
-    /googlesyndication\.([a-z.]+)\/ddm/i,
-    /pixel\.facebook\.([a-z.]+)/i,
-    /facebook\.([a-z.]+)\/(impression\.php|tr)+/i,
-    /ad\.bitmedia\.io/i,
-    /yahoo\.([a-z.]+)\/pixel/i,
-    /criteo\.net\/img/i,
-    /ad\.doubleclick\.net/i
-  ];
+  // KEEP IN SYNC with TRACKING_RE in prehook.js. Combined into one regex so each
+  // candidate URL is tested once instead of running 13 separate patterns.
+  const TRACKING_RE = new RegExp([
+    "pagead",
+    "(?:pixel|cleardot)\\.*\\.(?:gif|jpg|jpeg)",
+    "google\\.(?:[a-z.]+)\\/(?:ads|generate_204|.*\\/log204)+",
+    "google-analytics\\.(?:[a-z.]+)\\/(?:r|collect)+",
+    "youtube\\.(?:[a-z.]+)\\/(?:api|ptracking|player_204|live_204)+",
+    "doubleclick\\.(?:[a-z.]+)\\/(?:pcs|pixel|r)+",
+    "googlesyndication\\.(?:[a-z.]+)\\/ddm",
+    "pixel\\.facebook\\.(?:[a-z.]+)",
+    "facebook\\.(?:[a-z.]+)\\/(?:impression\\.php|tr)+",
+    "ad\\.bitmedia\\.io",
+    "yahoo\\.(?:[a-z.]+)\\/pixel",
+    "criteo\\.net\\/img",
+    "ad\\.doubleclick\\.net"
+  ].join("|"), "i");
+
 
   let opts = null;
   let proxyConfig = null;
+  const proxyUrlCache = new Map();
+  const PROXY_CACHE_LIMIT = 512;
   const doneImg = new WeakSet();
   const doneLazy = new WeakSet();
   const doneBg = new WeakSet();
   let excludedDomains = new Set();
-  let proxyHost = "wsrv.nl";
+  const proxyHost = "wsrv.nl"; // proxy is fixed (WSRV_PROXY)
   const pageHost = location.hostname.toLowerCase();
   let pageExcluded = false;   // cached excludedHost(pageHost), rebuilt on settings change
   const lazyAttrSet = new Set(LAZY_ATTRS);
@@ -133,18 +139,18 @@
     // Keep them conservative so valid image URLs are never skipped accidentally.
     if (pageExcluded) return true;
     const lower = absolute.toLowerCase();
-    if (proxyHost && lower.startsWith("https://" + proxyHost + "/")) return true;
+    if (lower.startsWith("https://" + proxyHost + "/")) return true;
     if (lower.includes("favicon")) return true;
     if (lower.endsWith(".ico") || lower.includes(".ico?") || lower.includes(".ico#") ||
         lower.endsWith(".svg") || lower.includes(".svg?") || lower.includes(".svg#")) return true;
     if (isTinyOrTracking(lower)) return true;
-    if (TRACKING_PATTERNS.some(p => p.test(absolute))) return true;
+    if (TRACKING_RE.test(absolute)) return true;
 
     const u = safeURL(absolute);
     if (!u) return true;
 
     // Already proxied (handles non-https/case variations safely).
-    if (proxyHost && u.hostname.toLowerCase() === proxyHost) return true;
+    if (u.hostname.toLowerCase() === proxyHost) return true;
 
     // Excluded image host, including subdomains.
     const host = u.hostname.toLowerCase();
@@ -165,8 +171,23 @@
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
   }
 
+  function applyOpts(next) {
+    updateProxyConfig({ ...next, proxyBase: WSRV_PROXY });
+    srcsetCache = new WeakMap();
+    dataSrcsetCache = new WeakMap();
+    proxyUrlCache.clear();
+    excludedDomains = domainSet(opts.excludeDomains);
+    pageExcluded = excludedHost(pageHost);
+  }
+
+  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains"]
+    .every(k => a[k] === b[k]);
+
   function buildProxyUrl(orig) {
     if (!proxyConfig || !isHttp(orig)) return orig;
+
+    const cached = proxyUrlCache.get(orig);
+    if (cached) return cached;
 
     const { base, sep, quality, maxWidth, grayscale } = proxyConfig;
     const parts = [
@@ -175,19 +196,69 @@
     ];
 
     if (maxWidth) {
-      // Preserve aspect ratio and never enlarge smaller images.
-      parts.push("w=" + maxWidth, "fit=inside", "we=1", "dpr=2");
+      // Preserve aspect ratio and never enlarge smaller images. Limit DPR to 2
+      // so high-density displays do not silently double the requested pixels again.
+      const dpr = Math.min(2, Math.max(1, Number(globalThis.devicePixelRatio) || 1));
+      parts.push("w=" + maxWidth, "fit=inside", "we=1", "dpr=" + dpr);
     }
 
     if (grayscale) {
       parts.push("filt=greyscale");
     }
 
-    // wsrv.nl supports these natively; keep animated/multi-page inputs intact
-    // while delivering a browser-friendly WebP response.
-    parts.push("maxage=1d", "page=-1", "n=-1", "output=webp");
+    // Keep animated/multi-page inputs intact and use a longer browser cache to
+    // reduce repeat downloads while retaining a bounded freshness window.
+    // default=1 makes wsrv.nl fall back to the original URL if processing fails.
+    parts.push("maxage=30d", "page=-1", "n=-1", "output=webp", "default=1");
 
-    return base + sep + parts.join("&");
+    const result = base + sep + parts.join("&");
+    if (proxyUrlCache.size >= PROXY_CACHE_LIMIT) {
+      proxyUrlCache.delete(proxyUrlCache.keys().next().value);
+    }
+    proxyUrlCache.set(orig, result);
+    return result;
+  }
+
+  // Spec-style srcset parser (KEEP IN SYNC with prehook.js): commas inside a URL
+  // (e.g. Cloudinary "w_400,h_300") belong to the URL, not the candidate list.
+  function parseSrcset(ss) {
+    const out = [];
+    const n = ss.length;
+    let i = 0;
+    while (i < n) {
+      while (i < n && /[\s,]/.test(ss[i])) i++;
+      if (i >= n) break;
+      const s = i;
+      while (i < n && !/\s/.test(ss[i])) i++;
+      let url = ss.slice(s, i);
+      let desc = "";
+      if (url.endsWith(",")) {
+        url = url.replace(/,+$/, "");
+      } else {
+        const d = i;
+        while (i < n && ss[i] !== ",") i++;
+        desc = ss.slice(d, i).trim();
+      }
+      if (url) out.push({ url, desc });
+    }
+    return out;
+  }
+
+  // Rewrites a srcset string; cached per element. A rewritten value maps to itself
+  // so the mutation our own write triggers is a cache hit, not a re-parse.
+  function rewriteSrcsetValue(ss, el, cache) {
+    const cached = cache.get(el);
+    if (cached && (cached.input === ss || cached.output === ss)) return cached.output;
+    let touched = false;
+    const parts = parseSrcset(ss).map(({ url, desc }) => {
+      const absolute = resolveHttp(url);
+      if (!absolute || shouldSkip(absolute)) return url + (desc ? " " + desc : "");
+      touched = true;
+      return buildProxyUrl(absolute) + (desc ? " " + desc : "");
+    });
+    const output = touched ? parts.join(", ") : ss;
+    cache.set(el, { input: ss, output });
+    return output;
   }
 
   // ── A) <img src> and <source srcset> rewriting ────────────────────────────
@@ -217,25 +288,9 @@
       // srcset — cache the last value for this element.
       const ss = el.getAttribute("srcset");
       if (ss) {
-        let rewritten = srcsetCache.get(el);
-        if (!rewritten || rewritten.input !== ss) {
-          let touched = false;
-          const parts = ss.split(",");
-          for (let i = 0; i < parts.length; i++) {
-            const part = parts[i];
-            const m = part.trim().match(/^(\S+)(\s.*)?$/);
-            if (!m) continue;
-            const url = m[1];
-            const absolute = resolveHttp(url);
-            if (!absolute || shouldSkip(absolute)) continue;
-            parts[i] = buildProxyUrl(absolute) + (m[2] || "");
-            touched = true;
-          }
-          rewritten = { input: ss, output: touched ? parts.join(", ") : ss };
-          srcsetCache.set(el, rewritten);
-        }
-        if (rewritten.output !== ss) {
-          el.setAttribute("srcset", rewritten.output);
+        const output = rewriteSrcsetValue(ss, el, srcsetCache);
+        if (output !== ss) {
+          el.setAttribute("srcset", output);
           rewrote = true;
         }
       }
@@ -246,9 +301,16 @@
 
   // ── B) Lazy-attr rewriting ─────────────────────────────────────────────────
   // Rewrites data-src etc. so lazy-loaders pass proxy URLs to prehook.
+  // data-src / data-url are also used for iframes, videos, scripts and share links.
+  // Proxying those through an image CDN would break them.
+  const NON_IMAGE_TAGS = new Set(["IFRAME", "SCRIPT", "A", "LINK", "VIDEO", "AUDIO", "EMBED",
+    "OBJECT", "BUTTON", "INPUT", "FORM", "META"]);
+  const NON_IMAGE_EXT_RE = /\.(?:mp4|webm|m3u8|mpd|mp3|ogg|wav|js|mjs|css|json|html?|php|pdf|zip|woff2?|ttf)(?:[?#]|$)/i;
+
   function rewriteLazy(el) {
     if (!el || doneLazy.has(el)) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
+    if (NON_IMAGE_TAGS.has(el.tagName)) return;
 
     let rewrote = false;
 
@@ -258,7 +320,7 @@
       if (!lazyAttrSet.has(attr.name)) continue;
       const val = attr.value;
       const absolute = val ? resolveHttp(val) : null;
-      if (!absolute || shouldSkip(absolute)) continue;
+      if (!absolute || NON_IMAGE_EXT_RE.test(absolute) || shouldSkip(absolute)) continue;
       el.setAttribute(attr.name, buildProxyUrl(absolute));
       rewrote = true;
     }
@@ -266,25 +328,9 @@
     // data-srcset — same per-element cache as normal srcset.
     const dss = el.getAttribute("data-srcset");
     if (dss) {
-      let rewritten = dataSrcsetCache.get(el);
-      if (!rewritten || rewritten.input !== dss) {
-        let touched = false;
-        const parts = dss.split(",");
-        for (let i = 0; i < parts.length; i++) {
-          const part = parts[i];
-          const m = part.trim().match(/^(\S+)(\s.*)?$/);
-          if (!m) continue;
-          const url = m[1];
-          const absolute = resolveHttp(url);
-          if (!absolute || shouldSkip(absolute)) continue;
-          parts[i] = buildProxyUrl(absolute) + (m[2] || "");
-          touched = true;
-        }
-        rewritten = { input: dss, output: touched ? parts.join(", ") : dss };
-        dataSrcsetCache.set(el, rewritten);
-      }
-      if (rewritten.output !== dss) {
-        el.setAttribute("data-srcset", rewritten.output);
+      const output = rewriteSrcsetValue(dss, el, dataSrcsetCache);
+      if (output !== dss) {
+        el.setAttribute("data-srcset", output);
         rewrote = true;
       }
     }
@@ -300,61 +346,97 @@
     if (!el || doneBg.has(el)) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
     const bg = el.style?.backgroundImage;
-    if (!bg || !bg.startsWith("url(")) return;
-    const raw = bg.slice(4, -1).replace(/['"]/g, "").trim();
-    const absolute = raw ? resolveHttp(raw) : null;
-    if (!absolute || shouldSkip(absolute)) return;
-    el.style.backgroundImage = `url("${buildProxyUrl(absolute)}")`;
+    if (!bg) return;
+
+    // Rewrite every HTTP(S) url(...) token while preserving gradients, CSS
+    // variables, quoted URLs, and non-HTTP resources.
+    const urlRe = /url\(\s*(?:(["'])(.*?)\1|([^)]*?))\s*\)/gi;
+    let touched = false;
+    const output = bg.replace(urlRe, (full, quote, quoted, bare) => {
+      const raw = String(quote ? quoted : bare || "").trim();
+      const absolute = raw ? resolveHttp(raw) : null;
+      if (!absolute || shouldSkip(absolute)) return full;
+      touched = true;
+      return `url("${buildProxyUrl(absolute)}")`;
+    });
+    if (!touched || output === bg) return;
+    el.style.backgroundImage = output;
     doneBg.add(el);
   }
 
+  const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]"].join(",");
+
   // ── Full-page scan ────────────────────────────────────────────────────────
+  function processCandidate(el) {
+    rewriteImg(el);
+    rewriteLazy(el);
+    rewriteBg(el);
+  }
+
   function rewriteAll() {
-    // Images and picture sources
-    document.querySelectorAll("img, picture source").forEach(rewriteImg);
-
-    // Lazy-loaded images
-    document.querySelectorAll(LAZY_SELECTOR).forEach(rewriteLazy);
-
-    // Inline backgrounds only need to scan elements that actually have a style
-    // attribute. The MutationObserver handles dynamically changed styles.
-    document.querySelectorAll("[style*='background' i]").forEach(rewriteBg);
+    document.querySelectorAll(CANDIDATE_SELECTOR).forEach(processCandidate);
   }
 
   // ── MutationObserver ───────────────────────────────────────────────────────
-  // Catches images added or changed after initial load (infinite scroll, SPAs…)
-  const mo = new MutationObserver(mutations => {
+  // Batch synchronous DOM churn into one microtask. This prevents repeated
+  // scans when frameworks append a subtree and immediately modify its attrs.
+  let pendingMutations = [];
+  let mutationFlushQueued = false;
+
+  function processMutations(mutations) {
+    const addedRoots = [];
+    const imageTargets = new Set();
+    const lazyTargets = new Set();
+    const bgTargets = new Set();
+
     for (const m of mutations) {
       if (m.type === "childList") {
         m.addedNodes.forEach(n => {
-          if (n.nodeType !== 1) return;
-          rewriteImg(n);
-          rewriteLazy(n);
-          rewriteBg(n);
-          n.querySelectorAll?.("img, source").forEach(rewriteImg);
-          n.querySelectorAll?.(LAZY_SELECTOR).forEach(rewriteLazy);
-          n.querySelectorAll?.("[style*='background' i]").forEach(rewriteBg);
+          if (n.nodeType === 1) addedRoots.push(n);
         });
       } else if (m.type === "attributes") {
         const t = m.target;
         if (!t) continue;
-        if (m.attributeName === "src" || m.attributeName === "srcset") {
-          if (t.tagName === "IMG" || t.tagName === "SOURCE") {
-            doneImg.delete(t); // allow re-rewrite when src/srcset changes
-            rewriteImg(t);
-          }
+        if ((m.attributeName === "src" || m.attributeName === "srcset") &&
+            (t.tagName === "IMG" || t.tagName === "SOURCE")) {
+          doneImg.delete(t);
+          imageTargets.add(t);
         } else if (m.attributeName === "style") {
           doneBg.delete(t);
-          rewriteBg(t);
+          bgTargets.add(t);
         } else if (lazyAttrSet.has(m.attributeName) || m.attributeName === "data-srcset") {
           doneLazy.delete(t);
-          rewriteLazy(t);
+          lazyTargets.add(t);
         }
       }
     }
-  });
 
-  mo.observe(document.documentElement, {
+    for (const root of addedRoots) {
+      processCandidate(root);
+      root.querySelectorAll?.(CANDIDATE_SELECTOR).forEach(processCandidate);
+    }
+    imageTargets.forEach(rewriteImg);
+    lazyTargets.forEach(rewriteLazy);
+    bgTargets.forEach(rewriteBg);
+  }
+
+  function queueMutationFlush(mutations) {
+    pendingMutations.push(...mutations);
+    if (mutationFlushQueued) return;
+    mutationFlushQueued = true;
+    const flush = () => {
+      mutationFlushQueued = false;
+      const batch = pendingMutations;
+      pendingMutations = [];
+      processMutations(batch);
+    };
+    if (typeof queueMicrotask === "function") queueMicrotask(flush);
+    else Promise.resolve().then(flush);
+  }
+
+  const mo = new MutationObserver(queueMutationFlush);
+
+  mo.observe(document, {
     childList:       true,
     subtree:         true,
     attributes:      true,
@@ -366,6 +448,8 @@
   // in parallel with HTML parsing, so the first image request doesn't pay the
   // full handshake cost (~100-300 ms on mobile).
   // dns-prefetch is a lighter fallback for browsers that ignore preconnect.
+  // No crossorigin attribute: <img> requests are credentialed no-cors fetches, and a
+  // crossorigin=anonymous preconnect would open a socket pool the images never reuse.
   function injectPreconnect(proxyBase) {
     try {
       const origin = new URL(proxyBase).origin;
@@ -375,7 +459,6 @@
       const pc = document.createElement("link");
       pc.rel  = "preconnect";
       pc.href = origin;
-      pc.crossOrigin = "anonymous";
       root.prepend(pc);
       const dns = document.createElement("link");
       dns.rel  = "dns-prefetch";
@@ -390,22 +473,14 @@
   // storage.sync and write the mirror so subsequent pages are fast.
   chrome.storage.local.get({ bhOpts: null }, d => {
     if (d.bhOpts) {
-      updateProxyConfig({ ...d.bhOpts, proxyBase: WSRV_PROXY });
-      excludedDomains = domainSet(opts.excludeDomains);
-      pageExcluded = excludedHost(pageHost);
-      proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
+      applyOpts(d.bhOpts);
       if (opts.enabled && opts.proxyBase) {
         injectPreconnect(opts.proxyBase);
         rewriteAll();
       }
     } else {
       chrome.storage.sync.get(DEFAULTS, synced => {
-        updateProxyConfig({ ...synced, proxyBase: WSRV_PROXY });
-        srcsetCache = new WeakMap();
-        dataSrcsetCache = new WeakMap();
-        excludedDomains = domainSet(opts.excludeDomains);
-        pageExcluded = excludedHost(pageHost);
-        proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
+        applyOpts(synced);
         // Write mirror so next page load takes the fast path
         chrome.storage.local.set({ bhOpts: opts });
         if (opts.enabled && opts.proxyBase) {
@@ -422,22 +497,13 @@
   // restarting, or not supported (Kiwi/Cromite). Both paths update opts.
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.bhOpts) {
-      updateProxyConfig({ ...(changes.bhOpts.newValue || DEFAULTS), proxyBase: WSRV_PROXY });
-      srcsetCache = new WeakMap();
-      dataSrcsetCache = new WeakMap();
-      excludedDomains = domainSet(opts.excludeDomains);
-      pageExcluded = excludedHost(pageHost);
-      proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
+      applyOpts(changes.bhOpts.newValue || DEFAULTS);
     } else if (area === "sync") {
-      // Rebuild opts from the sync change and also refresh the local mirror
       chrome.storage.sync.get(DEFAULTS, synced => {
-        updateProxyConfig({ ...synced, proxyBase: WSRV_PROXY });
-        srcsetCache = new WeakMap();
-        dataSrcsetCache = new WeakMap();
-        excludedDomains = domainSet(opts.excludeDomains);
-        pageExcluded = excludedHost(pageHost);
-        proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
-        chrome.storage.local.set({ bhOpts: opts });
+        const changed = !sameOpts(synced, opts);
+        applyOpts(synced);
+        // The service worker normally refreshes the mirror; only write when it differs.
+        if (changed) chrome.storage.local.set({ bhOpts: opts });
       });
     }
   });

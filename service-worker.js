@@ -1,4 +1,4 @@
-// Bandwidth Guardian — service worker
+// Bandwidth Saver — service worker
 //
 // ══ WHY DNR RULE 1 (image redirect) WAS REMOVED ══════════════════════════════
 //
@@ -22,7 +22,7 @@ const WSRV_PROXY = "https://wsrv.nl/";
 
 // Kiwi/Cromite do not support ES module service workers ("type": "module"),
 // so DEFAULTS is inlined here rather than imported from defaults.js.
-// Keep in sync with defaults.js if either file changes.
+// KEEP IN SYNC with defaults.js, prehook.js and content.js.
 const DEFAULTS = {
   enabled:         true,
   proxyBase:       "https://wsrv.nl/",
@@ -88,10 +88,8 @@ chrome.runtime.onStartup.addListener(function() {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   mirrorToLocal();
-  if ("enabled" in changes) {
-    refreshRules();
-    updateIcon();
-  }
+  if ("enabled" in changes || "excludeDomains" in changes) refreshRules();
+  if ("enabled" in changes) updateIcon();
 });
 
 mirrorToLocal();
@@ -113,14 +111,13 @@ function updateIcon() {
 // Reads content-length from proxy responses to track delivered proxy bytes.
 // Non-blocking — only observes, never delays requests.
 function getHeaderInt(headers, name) {
-  if (!Array.isArray(headers)) return false;
-  const h = headers.find(h => h.name.toLowerCase() === name.toLowerCase());
-  if (!h) return false;
-  const n = parseInt(h.value, 10);
-  return isNaN(n) ? false : n;
+  if (!Array.isArray(headers)) return null;
+  const h = headers.find(h => h.name.toLowerCase() === name);
+  const n = h ? parseInt(h.value, 10) : NaN;
+  return Number.isNaN(n) ? null : n;
 }
 
-if (chrome.webRequest && !chrome.webRequest.onCompleted.hasListener(onProxyCompleted)) {
+if (chrome.webRequest) {
   chrome.webRequest.onCompleted.addListener(
     onProxyCompleted,
     { urls: ["https://wsrv.nl/*"], types: ["image"] },
@@ -160,14 +157,15 @@ function scheduleStatsFlush() {
   }, 750);
 }
 
-function onProxyCompleted({ url, responseHeaders, fromCache }) {
+function onProxyCompleted({ url, responseHeaders, fromCache, statusCode }) {
   if (fromCache || !url.startsWith("https://wsrv.nl/")) return;
+  if (typeof statusCode === "number" && (statusCode < 200 || statusCode >= 300)) return;
 
   // wsrv.nl does not expose the old Bandwidth Hero x-bytes-saved /
   // x-original-size headers. Track the actual processed image bytes delivered
   // to the browser instead, which is the bandwidth figure we can verify.
   const bytesReceived = getHeaderInt(responseHeaders, "content-length");
-  if (bytesReceived === false) return;
+  if (bytesReceived === null) return;
 
   pendingStats.filesProcessed += 1;
   pendingStats.bytesProcessed += bytesReceived;
@@ -191,6 +189,14 @@ function doRefreshRules(done) {
       return;
     }
 
+    // Excluded sites are never proxied, so they keep their own CSP. DNR rejects the
+    // whole update on an invalid domain, so only well-formed hostnames are passed.
+    var excluded = String(opts.excludeDomains || "").split(/[,\s]+/)
+      .map(function(s) { return s.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""); })
+      .filter(function(s) { return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(s); });
+    var condition = { resourceTypes: ["main_frame", "sub_frame"] };
+    if (excluded.length) condition.excludedRequestDomains = Array.from(new Set(excluded));
+
     // Rule 2: Strip CSP headers so proxy-domain images aren't blocked by the page.
     var addRules = [{
       id: RULE_ID_CSP,
@@ -202,7 +208,7 @@ function doRefreshRules(done) {
           { header: "content-security-policy-report-only", operation: "remove" }
         ]
       },
-      condition: { resourceTypes: ["main_frame", "sub_frame"] }
+      condition: condition
     }];
 
     chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds, addRules: addRules }, done);

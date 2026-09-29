@@ -1,172 +1,161 @@
 # 🛡️ Bandwidth Saver
 
-> Reduce image bandwidth usage by rewriting image requests through [wsrv.nl](https://wsrv.nl/) — an on-the-fly image cache, resizing, and compression CDN powered by Nginx, libvips, and Cloudflare — before the browser downloads them.
+> Reduce image bandwidth usage by rewriting image URLs to go through [wsrv.nl](https://wsrv.nl/) — an on-the-fly image cache, resizing, and compression CDN powered by Nginx, libvips, and Cloudflare.
 
-**Bandwidth Saver** is a lightweight Manifest V3 browser extension focused on reducing image data usage while preserving normal browser image behavior.
+**Bandwidth Saver** is a small Manifest V3 browser extension. Content scripts rewrite eligible `http(s)` image URLs into wsrv.nl URLs, so the browser downloads a resized, recompressed (and by default grayscale) WebP instead of the original.
 
-It is designed to work conservatively: image interception happens early, while browser-controlled features such as `srcset` selection and lazy loading are preserved.
+It is conservative by design: it rewrites URLs and lets the browser keep doing `srcset` selection and lazy loading itself.
+
+---
+
+## ⚠️ Read this first (real-world trade-offs)
+
+- **Privacy:** every rewritten image URL — and therefore which images your pages load — is sent to **wsrv.nl / Cloudflare**, a third party. The proxy, not the extension, fetches the original image. Do not use it on sites you consider sensitive; add them to the exclusion list.
+- **Only publicly reachable images work.** wsrv.nl fetches the image from its own servers, without your cookies or network position. Images behind a login, on an intranet/localhost, or restricted by hotlink/IP rules will show as broken. There is **no automatic fallback** to the original URL. Workaround: exclude the site.
+- **CSP is stripped.** So proxied images can load on pages with a strict `img-src`, the extension removes `Content-Security-Policy` headers from page and frame responses (except on excluded domains). That removes a security layer on every non-excluded site. This is the trade-off of the approach in MV3.
+- **Some original bytes may still be downloaded.** Interception is best-effort, see [Interception architecture](#️-interception-architecture).
+- **Grayscale is on by default.** Turn it off in the popup or settings if you want colour.
+- **Statistics are delivered bytes, not "bytes saved".** See [Statistics](#-statistics).
 
 ---
 
 ## ✨ Features
 
-- **Image proxying** — routes eligible remote images through the wsrv.nl image optimization proxy.
-- **Quality control** — Small (45), Normal (60), or Sharp (80), with optional custom quality.
-- **Maximum width** — HD (768 px), Full HD (1024 px), or no limit, with optional custom width.
-- **Grayscale mode** — requests grayscale images through the proxy (**enabled by default**, matching the original Bandwidth Hero `convertBw: true` behavior).
-- **WebP output** — eligible images are delivered as WebP for efficient transfer.
-- **Double-proxy protection** — already processed proxy URLs are never wrapped again.
-- **`src` support** — handles normal HTML and JavaScript-assigned image URLs.
-- **`srcset` support** — rewrites image URLs without taking over the browser's candidate selection.
-- **Lazy-loading support** — preserves normal lazy-loading behavior; rewrites common `data-*` lazy-load attributes (`data-src`, `data-lazy-src`, `data-original`, etc.).
-- **Dynamic pages** — handles images added after the initial page load.
-- **Duplicate-work protection** — uses lightweight caching/markers (`WeakMap` srcset caches, `data-bh-*` markers) to avoid repeatedly processing the same DOM data.
-- **Early URL classification** — skips unsupported, excluded, already-proxied, SVG, and known tiny/tracking URLs before expensive processing.
-- **SVG handling** — external SVG images are left untouched; SVG data URLs are not proxied.
-- **Statistics batching** — reduces frequent storage writes.
-- **Configuration caching** — a `storage.local` mirror (`bhOpts`, ~5 ms reads) avoids repeatedly parsing the same proxy settings from `storage.sync` (~30–80 ms).
-- **Chromium & Firefox compatibility** — Manifest V3 with `browser_specific_settings.gecko` (Firefox 128+).
+- **Image proxying** — routes eligible remote images through wsrv.nl.
+- **Quality** — presets Small (45), Normal (60), Sharp (80), or a custom value from 1 to 100.
+- **Maximum width** — presets HD (768 px), Full HD (1024 px), No limit (0), or any custom width ≥ 0.
+- **Grayscale** — requests `filt=greyscale` (**enabled by default**, matching the original Bandwidth Hero `convertBw: true`).
+- **WebP output** — every proxied image is requested as `output=webp`; animated/multi-page images are kept (`n=-1`, `page=-1`).
+- **Double-proxy protection** — URLs already on `wsrv.nl` are never wrapped again.
+- **`src` and `srcset`** — rewrites each `srcset` candidate individually (URLs containing commas, such as `w_400,h_300`, are parsed correctly) without choosing candidates for the browser.
+- **Lazy-load attributes** — rewrites `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset` on non-media elements.
+- **Inline CSS backgrounds** — rewrites a single inline `background-image: url(...)`. Multiple backgrounds and gradients are left alone.
+- **Dynamic pages** — a `MutationObserver` handles nodes and attributes added or changed after load.
+- **Duplicate-work protection** — per-element `WeakSet`/`WeakMap` caches avoid reprocessing the same value.
+- **Early URL classification** — skips unsupported, excluded, already-proxied, SVG, icon, and known tiny/tracking URLs before building a proxy URL.
+- **Per-site exclusion** — from the popup or the settings page; subdomains of an excluded domain are excluded too.
+- **Preconnect** — injects `preconnect`/`dns-prefetch` hints for `wsrv.nl`.
+- **Settings mirror** — settings live in `storage.sync`; the service worker mirrors them to `storage.local` (`bhOpts`) because content scripts read local storage faster.
+- **Statistics batching** — counters are flushed to storage at most every ~750 ms.
 
-### Default image settings
+### Default settings
 
-Actual values from [`defaults.js`](defaults.js):
+Values from [`defaults.js`](defaults.js):
 
 ```text
-Enabled:        true
-Quality:        Normal — 60
-Max width:      HD — 768 px
-Grayscale:      true
-Output:         WebP
-Without enlargement: we=1
-Device pixel ratio:  dpr=2
-Browser cache:  1 day (maxage=1d)
+Enabled:          true
+Quality:          Normal — 60
+Max width:        HD — 768 px
+Grayscale:        true
 Excluded domains: google.com gstatic.com
 ```
 
-A typical request is standardized as:
+Fixed request parameters (not user-configurable): `fit=inside`, `we=1`, `dpr=2`, `maxage=1d`, `page=-1`, `n=-1`, `output=webp`.
+
+A typical request:
 
 ```text
-https://wsrv.nl/?url=<encoded-source-url>&q=60&w=768&fit=inside&we=1&dpr=2&maxage=1d&page=-1&n=-1&output=webp
+https://wsrv.nl/?url=<encoded-source-url>&q=60&w=768&fit=inside&we=1&dpr=2&filt=greyscale&maxage=1d&page=-1&n=-1&output=webp
 ```
 
-(plus `&filt=greyscale` when grayscale is on — the default).
+Parameter order is stable: `url`, `q`, then — **only when max width is not "No limit"** — `w`, `fit`, `we`, `dpr`; then `filt=greyscale` if enabled; then `maxage`, `page`, `n`, `output`. The source URL is encoded with `encodeURIComponent`.
+
+> **Note on `dpr=2`:** wsrv.nl treats `dpr` as a multiplier of `w`, so with `w=768` the delivered image can be up to **1536 px** wide (`we=1` prevents upscaling smaller images). The "max width" setting is therefore the CSS-pixel width, not the pixel width of the file.
 
 ---
 
 ## 🧩 How it works
 
-Bandwidth Saver intercepts eligible image URLs **before the original image request is allowed to consume bandwidth**.
-
-The simplified flow is:
-
 ```text
-Web page
+Web page (<img>, srcset, data-* lazy attrs, inline backgrounds, dynamic DOM)
    │
-   ├── <img src>
-   ├── srcset
-   ├── JavaScript Image()
-   ├── setAttribute()
-   └── dynamically inserted images
-          │
-          ▼
-   Early interception
-          │
-          ├── Already proxy URL? ──► Leave unchanged
-          ├── Excluded/unsupported? ► Leave unchanged
-          ├── SVG/tiny/tracking? ──► Leave unchanged
-          │
-          ▼
-   Build optimized proxy URL
-          │
-          ▼
-   Image optimization proxy (wsrv.nl)
-          │
-          ▼
-   Optimized image
-          │
-          ▼
-   Browser
+   ▼
+Content scripts (prehook.js + content.js)
+   │
+   ├── already wsrv.nl URL?      ──► leave unchanged
+   ├── excluded/non-http(s)?     ──► leave unchanged
+   ├── SVG / icon / tiny / ad?   ──► leave unchanged
+   │
+   ▼
+Build wsrv.nl URL (encoded source + quality/width/grayscale/webp)
+   │
+   ▼
+wsrv.nl  ──►  optimized image  ──►  browser
 ```
 
-Proxy requests use a stable wsrv.nl parameter order: `url`, `q`, `w`, `fit`, `we=1`, `dpr=2`, optional `filt=greyscale`, `maxage=1d`, `page=-1`, `n=-1`, and `output=webp`. The source image URL is URL-encoded with `encodeURIComponent` as required by wsrv.nl.
-
-The extension does **not** wait for an image to finish downloading before deciding whether to proxy it. Waiting for `naturalWidth`, image load events, or similar information would defeat the purpose of bandwidth saving.
+The extension never waits for an image to load or checks `naturalWidth` to decide whether to proxy it; that would defeat the purpose.
 
 ### Why DNR image redirects were removed
 
-An earlier version used Chrome's `declarativeNetRequest` `regexSubstitution` to redirect image requests. This was removed because DNR inserts the captured URL **raw** — it cannot call `encodeURIComponent`. For any image URL containing query parameters, the substitution produced a malformed proxy URL:
-
-```text
-Original URL:  https://example.com/img/photo.jpg?auto=webp&width=1092
-DNR result:    malformed — original query params orphaned into the proxy's own query string
-```
-
-Image `src` rewriting is now done entirely in content scripts (`content.js` and `prehook.js`), which **can** call `encodeURIComponent`. The only DNR rule kept is **Rule 2**, which strips CSP headers so proxy images can load. Legacy Rule 1 is actively removed on every service-worker refresh to clean up leftovers from previous versions.
+An earlier version used `declarativeNetRequest` `regexSubstitution` to redirect image requests. DNR inserts the captured URL **raw** and cannot call `encodeURIComponent`, so any image URL with its own query string produced a malformed proxy URL. Image rewriting is now done in content scripts only. The one remaining DNR rule is CSP stripping (Rule 2); legacy Rule 1 is removed on every service-worker refresh to clean up old installs.
 
 ---
 
 ## 🏗️ Interception architecture
 
-The interception path is intentionally conservative and split across two layers, both injected at `document_start` on all URLs and all frames.
+Both content scripts are injected as a **single** `content_scripts` entry (`prehook.js` first, then `content.js`) at `document_start`, on all URLs and all frames.
 
-### Layer 1 — `prehook.js` (synchronous)
+### Layer 1 — `prehook.js`
 
-Runs before the HTML parser and handles JavaScript-driven image assignments. It patches:
+Patches, in the content-script JavaScript world:
 
 - `HTMLImageElement.prototype.src`
 - `HTMLImageElement.prototype.srcset`
-- `Element.prototype.setAttribute` (for `src` / `srcset` on `<img>` and `<source>`)
-- `Image()` constructor
+- `HTMLSourceElement.prototype.srcset`
+- `Element.prototype.setAttribute` (for `src`/`srcset` on `<img>` and `<source>`)
 
-If options haven't loaded yet when an assignment occurs, the original value is stashed in `data-bh-pending-src` / `data-bh-pending-srcset` and the element is added to a `pending` set; once storage responds, pending elements are resolved. Zero wasted bytes — the proxy URL is set before any network request fires.
+`new Image()` needs no separate patch: its `src` goes through the patched prototype.
 
-### Layer 2 — `content.js` (async, after storage read)
+If settings have not loaded yet, the original value is stashed in `data-bh-pending-src` / `data-bh-pending-srcset`, the element is queued, and it is resolved once storage responds.
 
-Handles images and attributes that appear in the parsed DOM and images introduced later by dynamic applications:
+> **Known limitation — world isolation.** Content scripts run in an *isolated world*. Their prototype patches are visible to the extension's own code (`content.js`), but **not** to the page's own JavaScript, because the manifest does not declare `"world": "MAIN"`. In practice, images that page scripts create (`img.src = …`, `setAttribute`) are corrected by Layer 2's `MutationObserver` *after* the assignment, not before it. Running the prehook in the page world would need a redesign (it cannot use `chrome.storage` there), so it has not been done.
 
-- **(A) HTML-parsed `<img src="...">`** — the browser's C++ HTML parser sets `src` natively, bypassing the JS property-setter patch. By the time this script's storage callback fires (~5–50 ms), the browser may have already started fetching the original image. Rewriting `src` here causes the browser to cancel the in-flight original request and fetch from the proxy instead. A tiny amount of the original image's bytes may already be in flight — unavoidable in MV3 since `webRequestBlocking` was removed.
-- **(B) Lazy-load data attributes** (`data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`) — rewritten so that when a lazy-loader later does `img.src = img.dataset.src`, prehook receives the proxy URL and the browser never fetches the original.
-- **(C) Inline CSS `background-image`** — rewritten via `el.style.backgroundImage`. Best-effort: stylesheet-defined backgrounds may already be loading.
+### Layer 2 — `content.js`
+
+Runs after settings are read from storage and handles:
+
+- **(A) HTML-parsed `<img src>` / `srcset`** — the parser sets these natively. By the time settings are read (typically milliseconds), the browser may already have started the original request. Rewriting the attribute makes the browser switch to the proxy URL; a small amount of the original may already be in flight. This cannot be avoided in MV3 without `webRequestBlocking`.
+- **(B) Lazy-load `data-*` attributes** — rewritten so that when a lazy-loader copies them into `src`, the URL is already a proxy URL. Skipped on `iframe`, `script`, `a`, `link`, `video`, `audio`, `embed`, `object`, `button`, `input`, `form`, `meta`, and on URLs ending in non-image extensions (`.mp4`, `.js`, `.html`, …) so embeds and share links are not broken.
+- **(C) Inline `background-image`** — best-effort; backgrounds from stylesheets are not rewritten.
 
 ### Service worker (`service-worker.js`)
 
-Handles extension background tasks:
+- mirrors `storage.sync` settings into `storage.local` (`bhOpts`)
+- refreshes the toolbar icon (enabled/disabled)
+- collects statistics from `webRequest.onCompleted` on `https://wsrv.nl/*` image requests
+- installs/removes the DNR CSP-stripping rule (refreshed when **enabled** or **excluded domains** change), guarded against concurrent refreshes
 
-- configuration/storage synchronization (keeps the `storage.local` `bhOpts` mirror current)
-- statistics (images processed, bytes saved; batched writes)
-- extension state
-- DNR rule refresh (CSP stripping only) with a concurrency guard
-- other non-page interception work
+It is a classic (non-module) worker written with callbacks, because Kiwi/Cromite do not support ES-module service workers.
 
-Note: the service worker inlines its own copy of `DEFAULTS` (Kiwi/Cromite do not support ES module service workers), kept in sync with `defaults.js`.
+### Settings defaults are duplicated on purpose
 
----
-
-### Proxy duplication
-
-An image that already uses the configured optimization proxy is left alone.
-
-```text
-original image → optimization proxy → already optimized URL
-```
-
-will **not** become `proxy → proxy → proxy`. This prevents additional requests, latency, and bandwidth consumption.
+`defaults.js` is imported by the popup and options pages. `prehook.js`, `content.js` and `service-worker.js` cannot import it, so they carry inline copies marked `KEEP IN SYNC`. Change all four together.
 
 ---
 
 ## 🚫 Images intentionally skipped
 
-Not every image should be sent through an optimization proxy. Early checks skip:
+Skipped by URL only (never by downloaded dimensions):
 
-- already-proxied URLs (wsrv.nl)
-- non-HTTP(S) URLs
-- excluded domains (default: `google.com`, `gstatic.com`)
-- unsupported URL types
-- external SVG images
-- SVG data URLs
-- known tiny/tracking image URL patterns (e.g. `1x1`, `2x2`, `pixel`, `spacer`, `tracking` in the path, or `w`/`h`/`width`/`height` query params ≤ 32 px, plus `/pagead/i`)
+- already-proxied `wsrv.nl` URLs
+- non-`http(s)` URLs, including `data:` and `blob:`
+- empty `src` values (`img.src = ""` is passed through, not proxied)
+- excluded domains (default `google.com`, `gstatic.com`) and their subdomains
+- SVG URLs (`.svg`), `.ico` files, and anything containing `favicon`
+- tiny/tracking patterns: `1x1`, `2x2`, `pixel`, `spacer`, `tracking` as a path/filename token; `w`/`h`/`width`/`height` query values ≤ 32
+- known ad/tracking URLs: `pagead`, `cleardot`/`pixel` gifs, Google ads/analytics endpoints, YouTube tracking, DoubleClick, googlesyndication, Facebook pixel/impression, bitmedia, Yahoo pixel, Criteo
 
-Tiny/tracking detection is deliberately conservative and based on URL patterns only. The extension does **not** use image dimensions obtained after download to make this decision.
+`content.js` and `prehook.js` use the same skip rules (and the same tracking regex).
+
+---
+
+## 📊 Statistics
+
+The settings page shows **images processed** and **bytes delivered by wsrv.nl**. Bytes come from the response's `content-length` header on non-cached wsrv.nl image responses. Consequences:
+
+- It is *not* a "bytes saved" figure — wsrv.nl does not report original sizes.
+- Responses without a `content-length` header are not counted, so totals can under-report.
+- Cached responses are not counted.
 
 ---
 
@@ -184,30 +173,18 @@ See the repository license and source files for applicable third-party licenses 
 
 ## 🔒 Protected behavior
 
-The following areas are considered part of the **stable core** and should not be changed casually.
+These areas are the **stable core** and should not be changed casually.
 
 ### 1. Prehook interception
-
-Do not delay or redesign the early interception path without a full regression test. The extension must continue to intercept image URLs before the original download whenever possible.
+Do not delay or redesign the early interception path without a full regression test. Intercept image URLs before the original download whenever possible.
 
 ### 2. MutationObserver behavior
-
-Do not introduce aggressive delayed batching. An earlier experimental implementation that aggressively batched MutationObserver work caused compatibility problems with **Google Image Search** and was reverted.
+Do not introduce aggressive delayed batching. An earlier experiment that batched MutationObserver work aggressively caused compatibility problems with **Google Image Search** and was reverted.
 
 ### 3. Proxy URL construction
-
-Do not change the working proxy URL construction without testing:
-
-- normal images
-- query-string image URLs
-- grayscale
-- quality
-- maximum width
-- WebP output
-- already-proxied URLs
+Do not change the proxy URL construction without testing: normal images, query-string image URLs, grayscale, quality, maximum width (including "No limit"), WebP output, and already-proxied URLs.
 
 ### 4. Double-proxy protection
-
 Already processed proxy URLs must never be wrapped again.
 
 ---
@@ -217,50 +194,51 @@ Already processed proxy URLs must never be wrapped again.
 ### From source
 
 1. Download or clone the repository.
-2. Open the extensions page in your browser:
+2. Open the extensions page:
    - Chromium: `chrome://extensions`
-   - Firefox: `about:debugging` → This Firefox → Load Temporary Add-on (or `about:addons` for signed builds)
+   - Firefox: `about:debugging` → This Firefox → Load Temporary Add-on
 3. Enable **Developer mode** (Chromium).
-4. Select **Load unpacked**.
-5. Choose the Bandwidth Saver project directory.
-6. Open the extension popup/settings and configure quality, max width, grayscale, and excluded domains.
+4. Select **Load unpacked** and choose the project directory (Firefox: select `manifest.json`).
+5. Open the popup/settings to configure quality, max width, grayscale, and excluded domains.
 
-The exact availability of extension APIs can vary between browsers. Firefox support requires version **128.0+** (per `browser_specific_settings.gecko` in `manifest.json`).
+Firefox requires **128.0+** (`browser_specific_settings.gecko`). The manifest lists both `background.service_worker` (Chromium) and `background.scripts` (Firefox). Browser support beyond Chromium should be verified on your build; Kiwi/Cromite are handled by the classic-worker design.
+
+### Using it
+
+- **Popup:** enable toggle, grayscale toggle, quality presets (changing quality reloads the tab), per-site exclude, reload button, link to settings.
+- **Settings page:** enable, grayscale, quality and width presets or custom values, excluded domains, statistics, reset. Custom values are validated on Save (quality 1–100, width 0 or more). Saving a changed quality or width reloads the active web tab.
+- Changes affect images loaded **after** the change; reload the page to apply them to existing images.
 
 ### Permissions used
 
 From `manifest.json`:
 
-- `storage` — settings and statistics
-- `tabs` — reload current page after settings change; per-site exclude UI
-- `declarativeNetRequestWithHostAccess` — CSP header stripping (DNR Rule 2)
-- `webRequest` — extension state handling
-- Host permissions: `<all_urls>` — required to intercept images on every website
+- `storage` — settings, settings mirror, statistics
+- `tabs` — read the active tab's URL for the per-site exclude button; reload the tab after settings change
+- `declarativeNetRequestWithHostAccess` — CSP header stripping (Rule 2)
+- `webRequest` — read-only observation of wsrv.nl image responses for statistics (no blocking)
+- Host permissions `<all_urls>` — required to run on every website
 
 ---
 
 ## 🏗️ Build
 
-The repository includes a reproducible build script:
-
 ```bash
 bash build.sh
 ```
 
-It validates `manifest.json` (single source of truth for the version), stages the required files, sets a fixed `SOURCE_DATE_EPOCH` (1709856000) for reproducibility, and produces:
+The script reads the version from `manifest.json` (single source of truth) and validates it, stages the required files (including `LICENSE`), checks that every file referenced by the manifest exists, sets fixed file timestamps (`SOURCE_DATE_EPOCH=1709856000`) for a reproducible zip, verifies the archive, and prints:
 
 ```text
-dist/bandwidth-saver-*.zip
-SHA256: <printed after build>
+Built: dist/bandwidth-saver-<version>.zip
+SHA256: <hash>
 ```
 
-Custom output directory:
+Custom output directory: `bash build.sh --out /path/to/dir`.
 
-```bash
-bash build.sh --out /path/to/dir
-```
+The GitHub Actions workflow `build.yml` runs this on every push to `main` (and manually) and creates or updates a GitHub Release named after the manifest version. `Keep-Alive.yml` makes a periodic commit to keep the fork's scheduled workflows active.
 
-For development, the unpacked extension can be loaded directly through the browser's extension manager.
+For development, load the unpacked folder directly.
 
 ---
 
@@ -268,17 +246,18 @@ For development, the unpacked extension can be loaded directly through the brows
 
 ```text
 bandwidth-saver/
-├── manifest.json          # MV3 manifest — single source of truth for version
-├── defaults.js            # Shared DEFAULTS (quality 60, grayscale true, maxWidth 768, exclusions)
-├── prehook.js             # Layer 1: sync interception of JS-driven image assignments
-├── content.js             # Layer 2: HTML-parsed src, lazy-load data-*, inline backgrounds
-├── service-worker.js      # Background: storage sync, stats, DNR CSP rule, state
-├── popup.html / popup.js  # Toolbar popup: enable toggle, quality presets, per-site exclude
-├── options.html / options.js  # Settings page: quality/width presets + custom values, stats, reset
+├── manifest.json          # MV3 manifest — single source of truth for the version
+├── defaults.js            # DEFAULTS for popup/options (inline copies elsewhere)
+├── prehook.js             # Layer 1: patches src/srcset/setAttribute (isolated world)
+├── content.js             # Layer 2: parsed src/srcset, lazy data-*, backgrounds, observer
+├── service-worker.js      # Settings mirror, icon, stats, DNR CSP rule
+├── popup.html / popup.js  # Toolbar popup
+├── options.html / options.js  # Settings page
 ├── icons/                 # 16/32/48/128 px icons (+ disabled variants)
 ├── _locales/en/           # Localized name/description
 ├── build.sh               # Reproducible zip build
-├── CHANGELOG.md           # (currently empty — populated at release time)
+├── .github/workflows/     # build.yml (build + release), Keep-Alive.yml
+├── CHANGELOG.md           # currently empty
 └── LICENSE
 ```
 

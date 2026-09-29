@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bandwidth Guardian — reproducible extension build
+# Bandwidth Saver — reproducible extension build
 
 set -euo pipefail
 
@@ -29,6 +29,15 @@ with open(sys.argv[1], encoding='utf-8') as f:
 PY
 )"
 
+# Fast preflight: validate every shipped JavaScript file before packaging.
+# This catches syntax regressions early and requires only the Node runtime.
+for js in service-worker.js prehook.js content.js popup.js options.js defaults.js; do
+  node --check "$ROOT_DIR/$js" >/dev/null || {
+    echo "ERROR: JavaScript syntax check failed: $js" >&2
+    exit 1
+  }
+done
+
 # The manifest is the single source of truth for the extension version.
 # Do not hard-code a release version here: every manifest version must build.
 python3 - "$VERSION" <<'PYVERCHECK'
@@ -53,6 +62,7 @@ INCLUDE=(
   options.js
   _locales
   icons
+  LICENSE
 )
 
 STAGING="$(mktemp -d)"
@@ -74,9 +84,25 @@ with open(manifest_path, encoding='utf-8') as f:
 assert manifest.get('manifest_version') == 3, 'Manifest V3 required'
 version = manifest.get('version')
 assert isinstance(version, str) and version, 'Manifest version missing'
+root = os.path.dirname(manifest_path)
 for item in sys.argv[2:]:
-    if not os.path.exists(os.path.join(os.path.dirname(manifest_path), item)):
+    if not os.path.exists(os.path.join(root, item)):
         raise SystemExit(f'Missing staged item: {item}')
+
+# Every file the manifest references must be in the package.
+refs = set()
+def collect(v):
+    if isinstance(v, str):
+        if v.endswith(('.js', '.html', '.png', '.json')):
+            refs.add(v)
+    elif isinstance(v, dict):
+        for x in v.values(): collect(x)
+    elif isinstance(v, list):
+        for x in v: collect(x)
+collect({k: v for k, v in manifest.items() if k != 'browser_specific_settings'})
+for ref in sorted(refs):
+    if not os.path.exists(os.path.join(root, ref)):
+        raise SystemExit(f'Manifest references missing file: {ref}')
 PY
 
 find "$STAGING" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
@@ -91,7 +117,11 @@ ZIP_ENTRIES="$(unzip -Z1 "$ZIPFILE")"
 grep -Fxq 'manifest.json' <<< "$ZIP_ENTRIES"
 grep -Fxq 'popup.html' <<< "$ZIP_ENTRIES"
 grep -Fxq 'options.html' <<< "$ZIP_ENTRIES"
-! grep -q '^bandwidth-saver-main/' <<< "$ZIP_ENTRIES"
+# NOTE: a bare `! cmd` is exempt from `set -e`, so use an explicit if.
+if grep -q '^bandwidth-saver-main/' <<< "$ZIP_ENTRIES"; then
+  echo "ERROR: zip contains a top-level project folder" >&2
+  exit 1
+fi
 
 echo "Built: $ZIPFILE"
 echo "SHA256: $(sha256sum "$ZIPFILE" | awk '{print $1}')"

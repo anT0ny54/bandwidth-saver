@@ -18,6 +18,10 @@ const presetBtns  = Array.from(document.querySelectorAll("#qualityPresets .prese
 
 const PRESETS = [45, 60, 80];
 
+// Full settings state. Storage change events only carry the changed keys, so they
+// must be merged into this — merging into DEFAULTS reset unchanged keys (e.g. a
+// disabled extension appeared enabled after toggling grayscale).
+let state = { ...DEFAULTS };
 let currentHost  = "";
 let currentIsWeb = false;
 
@@ -69,9 +73,9 @@ function updateEnabledUI(enabled) {
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 async function load() {
-  const d = await chrome.storage.sync.get(DEFAULTS);
-  applyUI(d);
-  loadSiteUI(d);
+  state = await chrome.storage.sync.get(DEFAULTS);
+  applyUI(state);
+  loadSiteUI(state);
 }
 load();
 
@@ -81,7 +85,6 @@ enabledEl.addEventListener("change", async () => {
   const enabled = enabledEl.checked;
   await chrome.storage.sync.set({ enabled });
   updateEnabledUI(enabled);
-  loadSiteUI(await chrome.storage.sync.get(DEFAULTS));
 });
 
 // ── Grayscale ─────────────────────────────────────────────────────────────────
@@ -172,7 +175,7 @@ excludeBtn.addEventListener("click", async () => {
   if (excludedDomain) list.delete(excludedDomain);
   else list.add(currentHost);
   await chrome.storage.sync.set({ excludeDomains: Array.from(list).join(" ") });
-  loadSiteUI(await chrome.storage.sync.get(DEFAULTS));
+  showNudge(); // page must reload for the change to take effect
 });
 
 // ── Open settings page ────────────────────────────────────────────────────────
@@ -189,8 +192,7 @@ settingsBtn.addEventListener("click", () => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   // Apply directly from the change payload — no redundant storage re-read.
-  const patch = Object.fromEntries(
-    Object.entries(changes).map(([k, v]) => [k, v.newValue])
-  );
-  applyUI({ ...DEFAULTS, ...patch });
+  for (const [k, v] of Object.entries(changes)) state[k] = v.newValue ?? DEFAULTS[k];
+  applyUI(state);
+  if ("excludeDomains" in changes || "enabled" in changes) loadSiteUI(state);
 });

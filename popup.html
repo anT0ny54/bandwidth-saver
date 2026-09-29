@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Bandwidth Saver</title>
+  <style>
+    /* ── Brand palette — drawn from logo gradient ────────────────────────── */
+    :root {
+      --brand-a:  #1a3e99;   /* deep navy  */
+      --brand-b:  #0891b2;   /* cyan-teal  */
+      --brand-c:  #16a34a;   /* guardian green */
+      --grad: linear-gradient(135deg, var(--brand-a), var(--brand-b), var(--brand-c));
+
+      --bg:     #0b1120;
+      --card:   #111827;
+      --border: #1f2d45;
+      --text:   #e2e8f0;
+      --sub:    #64748b;
+      --blue:   #3b82f6;
+      --green:  #22c55e;
+      --red:    #ef4444;
+      --off:    #374151;
+      --r:      14px;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:    #f0f6ff;
+        --card:  #ffffff;
+        --border:#cdd9ef;
+        --text:  #0f172a;
+        --sub:   #64748b;
+        --blue:  #1d4ed8;
+        --green: #15803d;
+        --red:   #dc2626;
+        --off:   #94a3b8;
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+      min-width: 300px;
+    }
+    .wrap {
+      max-width: 360px;
+      margin: 0 auto;
+      padding: 10px 10px env(safe-area-inset-bottom, 10px);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: var(--r);
+      overflow: hidden;
+    }
+
+    /* ── Header ─────────────────────────────────────────────────────────── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 13px 14px;
+    }
+    .shield {
+      width: 36px; height: 36px; flex-shrink: 0;
+    }
+    .header-title {
+      font-weight: 800;
+      font-size: 14px;
+      background: var(--grad);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -.2px;
+    }
+    .header-sub { font-size: 11px; color: var(--sub); margin-top: 1px; }
+
+    /* ── Toggle rows ─────────────────────────────────────────────────────── */
+    .toggle-row {
+      display: flex; align-items: center;
+      justify-content: space-between;
+      gap: 10px; padding: 13px 14px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      border-top: 1px solid var(--border);
+    }
+    .toggle-row:first-child { border-top: none; }
+    .tr-label { font-weight: 600; font-size: 13px; }
+    .tr-hint  { font-size: 11px; color: var(--sub); margin-top: 1px; }
+
+    .switch {
+      -webkit-appearance: none; appearance: none;
+      flex-shrink: 0;
+      width: 46px; height: 26px;
+      border-radius: 999px;
+      background: var(--off);
+      border: none; outline: none; cursor: pointer;
+      position: relative;
+      transition: background .18s;
+    }
+    .switch::after {
+      content: "";
+      position: absolute; top: 3px; left: 3px;
+      width: 20px; height: 20px; border-radius: 50%;
+      background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35);
+      transition: transform .18s cubic-bezier(.4,0,.2,1);
+    }
+    .switch:checked { background: var(--brand-b); }
+    .switch:checked::after { transform: translateX(20px); }
+
+    .card-dim { opacity: .4; pointer-events: none; }
+
+    /* ── Quality presets ─────────────────────────────────────────────────── */
+    .section-head {
+      font-size: 10px; font-weight: 700; color: var(--sub);
+      text-transform: uppercase; letter-spacing: .07em;
+      padding: 12px 14px 0;
+    }
+    .presets {
+      display: grid; grid-template-columns: repeat(3, 1fr);
+      gap: 6px; padding: 8px 14px 12px;
+    }
+    .preset {
+      -webkit-appearance: none; appearance: none;
+      border: 1.5px solid var(--border);
+      background: transparent; color: var(--text);
+      border-radius: 10px; padding: 8px 4px;
+      cursor: pointer; text-align: center;
+      transition: border-color .15s, background .15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .preset .p-label { font-weight: 700; font-size: 13px; display: block; }
+    .preset .p-hint  { font-size: 10px; color: var(--sub); display: block; margin-top: 2px; }
+    .preset.active {
+      border-color: var(--brand-b);
+      background: rgba(8,145,178,.12);
+      color: var(--brand-b);
+    }
+    .preset.active .p-hint { color: inherit; opacity: .8; }
+
+    /* ── Reload nudge ────────────────────────────────────────────────────── */
+    .nudge {
+      display: none;
+      align-items: center; gap: 8px;
+      padding: 9px 14px;
+      background: rgba(245,158,11,.10);
+      border-top: 1px solid rgba(245,158,11,.25);
+      font-size: 12px; color: #b45309;
+    }
+    @media (prefers-color-scheme: light) { .nudge { color: #92400e; } }
+    .nudge.show { display: flex; }
+    .nudge-btn {
+      -webkit-appearance: none; appearance: none;
+      margin-left: auto; flex-shrink: 0;
+      padding: 4px 10px; border-radius: 7px;
+      font-size: 11px; font-weight: 700; cursor: pointer;
+      border: 1px solid rgba(245,158,11,.4);
+      background: rgba(245,158,11,.15);
+      color: inherit;
+    }
+
+    /* ── Site card ───────────────────────────────────────────────────────── */
+    .site-row {
+      display: flex; align-items: center;
+      gap: 8px; padding: 11px 14px;
+      font-size: 12px;
+    }
+    .site-host {
+      flex: 1; font-weight: 600;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .site-pill {
+      font-size: 10px; font-weight: 700;
+      padding: 2px 7px; border-radius: 999px; flex-shrink: 0;
+    }
+    .site-pill.excluded { background: rgba(239,68,68,.14); color: var(--red); }
+
+    /* ── Buttons ─────────────────────────────────────────────────────────── */
+    .btn-row { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+    .btn {
+      -webkit-appearance: none; appearance: none;
+      flex: 1; min-height: 42px;
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      border-radius: calc(var(--r) - 2px);
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      border: 1px solid var(--border);
+      background: transparent; color: var(--text);
+      transition: opacity .12s, transform .1s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn:active  { transform: scale(.96); opacity: .75; }
+    .btn.primary {
+      background: var(--grad);
+      border: none;
+      color: #fff;
+    }
+    .btn:disabled { opacity: .35; cursor: default; transform: none; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Header card: shield + title + enable toggle -->
+  <div class="card">
+    <div class="header">
+      <!-- Shield SVG — mirrors the logo geometry -->
+      <svg class="shield" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <linearGradient id="g" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+            <stop offset="0%"   stop-color="#1a3e99"/>
+            <stop offset="50%"  stop-color="#0891b2"/>
+            <stop offset="100%" stop-color="#22c55e"/>
+          </linearGradient>
+        </defs>
+        <path d="M18 2 L33 8 L33 18 C33 26 26 32 18 34 C10 32 3 26 3 18 L3 8 Z"
+              fill="url(#g)" rx="2"/>
+        <!-- mountain -->
+        <polyline points="7,26 13,16 17,21 23,12 29,26"
+                  fill="none" stroke="white" stroke-width="1.8"
+                  stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>
+        <!-- network dots + line -->
+        <line x1="10" y1="24" x2="19" y2="19" stroke="white" stroke-width="1.5" opacity="0.85"/>
+        <line x1="19" y1="19" x2="27" y2="22" stroke="white" stroke-width="1.5" opacity="0.85"/>
+        <circle cx="10" cy="24" r="2" fill="white" opacity="0.9"/>
+        <circle cx="19" cy="19" r="2" fill="white" opacity="0.9"/>
+        <circle cx="27" cy="22" r="2" fill="white" opacity="0.9"/>
+      </svg>
+      <div>
+        <div class="header-title">Bandwidth Saver</div>
+        <div class="header-sub" id="headerSub">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Enable toggle — always interactive, never dimmed -->
+    <label class="toggle-row" for="enabled">
+      <div>
+        <div class="tr-label">Enable compression</div>
+        <div class="tr-hint">Route images through proxy</div>
+      </div>
+      <input type="checkbox" id="enabled" class="switch">
+    </label>
+
+    <!-- Reload nudge after changing grayscale or quality -->
+    <div class="nudge" id="nudge">
+      Reload the page to apply changes
+      <button class="nudge-btn" id="reloadBtn" type="button">Reload</button>
+    </div>
+  </div>
+
+  <!-- Compression settings — dims when extension is off -->
+  <div class="card" id="ctrlCard">
+    <label class="toggle-row" style="border-top:none" for="grayscale">
+      <div>
+        <div class="tr-label">Grayscale</div>
+        <div class="tr-hint">B&amp;W images use less data</div>
+      </div>
+      <input type="checkbox" id="grayscale" class="switch">
+    </label>
+    <div class="section-head">Quality</div>
+    <div class="presets" id="qualityPresets">
+      <button class="preset" data-q="20" type="button">
+        <span class="p-label">Small</span>
+        <span class="p-hint">Saves most</span>
+      </button>
+      <button class="preset" data-q="40" type="button">
+        <span class="p-label">Normal</span>
+        <span class="p-hint">Recommended</span>
+      </button>
+      <button class="preset" data-q="80" type="button">
+        <span class="p-label">Sharp</span>
+        <span class="p-hint">Best quality</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Current site -->
+  <div class="card">
+    <div class="site-row">
+      <span>🌐</span>
+      <span class="site-host" id="siteName">—</span>
+      <span class="site-pill" id="sitePill" style="display:none"></span>
+    </div>
+    <div class="btn-row">
+      <button id="excludeBtn" class="btn" type="button">Exclude this site</button>
+    </div>
+  </div>
+
+  <!-- Settings button -->
+  <div style="display:flex;gap:8px">
+    <button id="settingsBtn" class="btn primary" type="button" style="flex:1;min-height:42px">
+      ⚙ Settings
+    </button>
+  </div>
+
+</div>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

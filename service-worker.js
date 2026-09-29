@@ -69,12 +69,12 @@ function mirrorToLocal() {
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(function() {
+  // Top-level mirrorToLocal()/refreshRules()/updateIcon() already ran on this
+  // same worker start; only seed missing sync keys here, don't redo the work.
   chrome.storage.sync.get(DEFAULTS, function(d) {
     d.proxyBase = WSRV_PROXY;
     chrome.storage.sync.set(d, function() {
-      mirrorToLocal();
-      refreshRules();
-      updateIcon();
+      mirrorToLocal(); // seed the local mirror for content scripts
     });
   });
 });
@@ -105,7 +105,7 @@ function updateIcon() {
     const path = on
       ? { 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" }
       : { 16: "icons/icon-16-disabled.png", 32: "icons/icon-32-disabled.png", 48: "icons/icon-48-disabled.png", 128: "icons/icon-128-disabled.png" };
-    chrome.action.setIcon({ path }).catch?.(() => {});
+    Promise.resolve(chrome.action.setIcon({ path })).catch(() => {});
   });
 }
 

@@ -188,5 +188,9 @@ settingsBtn.addEventListener("click", () => {
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
-  chrome.storage.sync.get(DEFAULTS, applyUI);
+  // Apply directly from the change payload — no redundant storage re-read.
+  const patch = Object.fromEntries(
+    Object.entries(changes).map(([k, v]) => [k, v.newValue])
+  );
+  applyUI({ ...DEFAULTS, ...patch });
 });

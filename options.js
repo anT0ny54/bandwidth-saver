@@ -20,6 +20,10 @@ const widthPresets   = Array.from(document.querySelectorAll("#widthPresets  .pre
 
 const QUALITY_PRESETS = [45, 60, 80];
 const WIDTH_PRESETS   = [768, 1024, 0];
+// Last values loaded from storage, used to restore preset highlights when a
+// custom input is cleared (previously this wrongly restored DEFAULTS).
+let savedQuality = DEFAULTS.quality;
+let savedWidth   = DEFAULTS.maxWidth;
 
 if (versionEl) {
   versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
@@ -113,8 +117,10 @@ async function load() {
   enabledEl.checked   = !!d.enabled;
   grayscaleEl.checked = !!d.grayscale;
   excludeEl.value     = d.excludeDomains || "";
-  setQualityUI(d.quality  ?? DEFAULTS.quality);
-  setWidthUI(d.maxWidth ?? DEFAULTS.maxWidth);
+  savedQuality = d.quality  ?? DEFAULTS.quality;
+  savedWidth   = d.maxWidth ?? DEFAULTS.maxWidth;
+  setQualityUI(savedQuality);
+  setWidthUI(savedWidth);
 
   const st = s.stats || {};
   statImagesEl.textContent = (st.filesProcessed || 0).toLocaleString();
@@ -138,8 +144,8 @@ customQualityEl.addEventListener("input", () => {
   if (!isNaN(v) && v >= 1 && v <= 100) {
     qualityPresets.forEach(b => b.classList.remove("active"));
   } else if (customQualityEl.value === "") {
-    // Restore nearest preset highlight when field is cleared
-    setQualityUI(DEFAULTS.quality);
+    // Restore the saved value's highlight when field is cleared
+    setQualityUI(savedQuality);
   }
 });
 
@@ -158,7 +164,7 @@ customWidthEl.addEventListener("input", () => {
   if (!isNaN(v) && v >= 0) {
     widthPresets.forEach(b => b.classList.remove("active"));
   } else if (customWidthEl.value === "") {
-    setWidthUI(DEFAULTS.maxWidth);
+    setWidthUI(savedWidth);
   }
 });
 
@@ -189,7 +195,9 @@ async function save() {
     excludeDomains,
   });
 
-  if (quality !== Number(current.quality ?? DEFAULTS.quality)) {
+  // Reload whenever a URL-shaping setting changed, not just quality.
+  if (quality  !== Number(current.quality  ?? DEFAULTS.quality) ||
+      maxWidth !== Number(current.maxWidth ?? DEFAULTS.maxWidth)) {
     await reloadCurrentPage();
   }
 

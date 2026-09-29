@@ -54,9 +54,13 @@ let pendingRefresh = false;
 function refreshRules() {
   if (refreshing) { pendingRefresh = true; return; }
   refreshing = true;
-  doRefreshRules();
-  refreshing = false;
-  if (pendingRefresh) { pendingRefresh = false; refreshRules(); }
+  doRefreshRules(function() {
+    refreshing = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      refreshRules();
+    }
+  });
 }
 
 // ── WebP detection ────────────────────────────────────────────────────────────
@@ -92,10 +96,6 @@ chrome.runtime.onInstalled.addListener(function() {
     d.proxyBase = WSRV_PROXY;
     chrome.storage.sync.set(d);
   });
-  chrome.storage.local.get(
-    { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } },
-    function(d) { chrome.storage.local.set(d); }
-  );
   checkWebpSupport(function(isWebpSupported) {
     chrome.storage.sync.set({ isWebpSupported: isWebpSupported });
     mirrorToLocal();
@@ -117,7 +117,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   mirrorToLocal();
   refreshRules();
-  if ("enabled" in changes || "excludeDomains" in changes) updateIcon();
+  if ("enabled" in changes) updateIcon();
 });
 
 mirrorToLocal();
@@ -136,7 +136,7 @@ function updateIcon() {
 }
 
 // ── Stats via webRequest response headers ─────────────────────────────────────
-// Reads x-bytes-saved and x-original-size from proxy responses.
+// Reads content-length from proxy responses to track delivered proxy bytes.
 // Non-blocking — only observes, never delays requests.
 function getHeaderInt(headers, name) {
   if (!Array.isArray(headers)) return false;
@@ -154,7 +154,7 @@ if (chrome.webRequest && !chrome.webRequest.onCompleted.hasListener(onProxyCompl
   );
 }
 
-let pendingStats = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+let pendingStats = { filesProcessed: 0, bytesProcessed: 0 };
 let statsFlushTimer = null;
 let statsFlushInProgress = false;
 
@@ -162,14 +162,14 @@ function flushStats() {
   if (statsFlushInProgress || !pendingStats.filesProcessed) return;
   statsFlushInProgress = true;
   const delta = pendingStats;
-  pendingStats = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+  pendingStats = { filesProcessed: 0, bytesProcessed: 0 };
   chrome.storage.local.get(
-    { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } },
+    { stats: { filesProcessed: 0, bytesProcessed: 0 } },
     d => {
-      const s = d.stats || { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+      const s = d.stats || { filesProcessed: 0, bytesProcessed: 0 };
+      delete s.bytesSaved; // retire the old unused stats field from prior versions.
       s.filesProcessed += delta.filesProcessed;
       s.bytesProcessed += delta.bytesProcessed;
-      s.bytesSaved += delta.bytesSaved;
       chrome.storage.local.set({ stats: s }, () => {
         statsFlushInProgress = false;
         if (pendingStats.filesProcessed) scheduleStatsFlush();
@@ -208,12 +208,12 @@ function onProxyCompleted({ url, responseHeaders, fromCache }) {
 // (e.g. await chrome.storage.sync.get()) is not available in classic
 // (non-module) service workers on Kiwi/Cromite and causes Status code: 2.
 
-function doRefreshRules() {
+function doRefreshRules(done) {
   chrome.storage.sync.get(DEFAULTS, function(opts) {
     var removeRuleIds = ALL_RULE_IDS;
 
     if (!opts.enabled) {
-      chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds });
+      chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds }, done);
       return;
     }
 
@@ -231,15 +231,7 @@ function doRefreshRules() {
       condition: { resourceTypes: ["main_frame", "sub_frame"] }
     }];
 
-    chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds, addRules: addRules });
+    chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds, addRules: addRules }, done);
   });
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function parseDomains(text) {
-  return String(text || "")
-    .split(/[,\s]+/)
-    .map(s => s.trim().toLowerCase()).filter(Boolean)
-    .map(s => s.replace(/^https?:\/\//, "").split("/")[0]);
-}

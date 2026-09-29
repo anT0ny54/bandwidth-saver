@@ -82,14 +82,16 @@ function readWidth() {
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 async function load() {
-  const d = await chrome.storage.sync.get(DEFAULTS);
+  const [d, s] = await Promise.all([
+    chrome.storage.sync.get(DEFAULTS),
+    chrome.storage.local.get({ stats: { filesProcessed: 0, bytesProcessed: 0 } })
+  ]);
   enabledEl.checked   = !!d.enabled;
   grayscaleEl.checked = !!d.grayscale;
   excludeEl.value     = d.excludeDomains || "";
   setQualityUI(d.quality  ?? DEFAULTS.quality);
   setWidthUI(d.maxWidth ?? DEFAULTS.maxWidth);
 
-  const s  = await chrome.storage.local.get({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } });
   const st = s.stats || {};
   statImagesEl.textContent = (st.filesProcessed || 0).toLocaleString();
   statBytesEl.textContent  = fmtBytes(st.bytesProcessed);
@@ -171,7 +173,7 @@ async function resetAll() {
 }
 
 async function resetStats() {
-  await chrome.storage.local.set({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } });
+  await chrome.storage.local.set({ stats: { filesProcessed: 0, bytesProcessed: 0 } });
   await load();
   showToast("Stats cleared");
 }

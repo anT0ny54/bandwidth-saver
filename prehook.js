@@ -15,7 +15,8 @@
   let ready = false;      // true once options have loaded
   let excludedDomains = new Set();
   let proxyConfig = null;
-  const pending = new Set(); // <img> elements waiting for opts to be ready
+  const pageHost = location.hostname.toLowerCase();
+  const pending = new Set(); // <img>/<source> elements waiting for opts to be ready
   const srcsetCache = new WeakMap();
 
   const safeURL = u => { try { return new URL(u); } catch { return null; } };
@@ -90,20 +91,25 @@
     return excludedDomains.has(String(host || "").toLowerCase());
   }
 
-  // Flush any <img> elements that were queued before opts loaded.
+  // Flush image/source elements queued while settings were loading.
   function flushPending() {
-    for (const img of pending) {
-      pending.delete(img);
+    for (const el of pending) {
+      pending.delete(el);
       try {
-        const orig = img.dataset.bhPendingSrc;
-        if (orig) {
-          img.removeAttribute("data-bh-pending-src");
-          nativeSetSrc(img, decideSrc(orig) ?? orig);
+        const pendingSrc = el.dataset.bhPendingSrc;
+        if (pendingSrc && el instanceof HTMLImageElement) {
+          el.removeAttribute("data-bh-pending-src");
+          nativeSetSrc(el, decideSrc(pendingSrc) ?? pendingSrc);
         }
-        const pendingSrcset = img.dataset.bhPendingSrcset;
+        const pendingSrcset = el.dataset.bhPendingSrcset;
         if (pendingSrcset) {
-          img.removeAttribute("data-bh-pending-srcset");
-          nativeSetSrcset(img, rewriteSrcset(pendingSrcset, img));
+          el.removeAttribute("data-bh-pending-srcset");
+          const rewritten = rewriteSrcset(pendingSrcset, el);
+          if (el instanceof HTMLImageElement) {
+            nativeSetSrcset(el, rewritten);
+          } else if (sourceProto && el instanceof HTMLSourceElement) {
+            nativeSourceSetSrcset(el, rewritten);
+          }
         }
       } catch {}
     }
@@ -164,6 +170,8 @@
 
   function rewriteSrcset(ss, el) {
     if (!ss) return ss;
+    if (excludedDomains.has(pageHost)) return ss;
+
     if (el) {
       const cached = srcsetCache.get(el);
       if (cached && cached.input === ss) return cached.output;
@@ -193,6 +201,7 @@
     // because content.js also rewrites parser-created images; without this guard
     // the prehook wraps the wsrv URL a second time.
     if (isWsrvUrl(original)) return original;
+    if (excludedDomains.has(pageHost)) return original;
     if (isTinyOrTracking(original.toLowerCase()) || /\.svg(?:[?#]|$)/i.test(original)) return original;
     const u = safeURL(original);
     if (!u) return original;
@@ -258,6 +267,8 @@
           const v = String(value || "");
           if (!ready || !opts || !opts.proxyBase) {
             this.dataset.bhPendingSrcset = v;
+            pending.add(this);
+            nativeSourceSetSrcset(this, "");
           } else {
             nativeSourceSetSrcset(this, rewriteSrcset(v, this));
           }
@@ -295,7 +306,8 @@
         const v = String(value || "");
         if (!ready || !opts || !opts.proxyBase) {
           this.dataset.bhPendingSrcset = v;
-          return setAttr.call(this, "srcset", v);
+          pending.add(this);
+          return setAttr.call(this, "srcset", "");
         }
         return setAttr.call(this, "srcset", rewriteSrcset(v, this));
       }

@@ -196,11 +196,13 @@
 
     if (el.tagName === "IMG" || el.tagName === "SOURCE") {
       // src
-      const src = el.getAttribute("src");
-      if (src && isHttp(src) && !shouldSkip(src)) {
-        // Use native src setter to avoid triggering prehook's patch again
-        nativeImgSrcSetter?.call(el, buildProxyUrl(src));
-        rewrote = true;
+      if (el.tagName === "IMG") {
+        const src = el.getAttribute("src");
+        if (src && isHttp(src) && !shouldSkip(src) && nativeImgSrcSetter) {
+          // Use native src setter to avoid triggering prehook's patch again.
+          nativeImgSrcSetter.call(el, buildProxyUrl(src));
+          rewrote = true;
+        }
       }
 
       // srcset — cache the last value for this element.

@@ -2,9 +2,9 @@
   "manifest_version": 3,
   "default_locale": "en",
   "name": "__MSG_extensionName__",
-  "short_name": "BW Guardian",
+  "short_name": "BW Saver",
   "description": "__MSG_extensionDescription__",
-  "version": "0.1.4",
+  "version": "0.0.1",
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -13,7 +13,7 @@
       "48": "icons/icon-48.png",
       "128": "icons/icon-128.png"
     },
-    "default_title": "Bandwidth Guardian"
+    "default_title": "Bandwidth Saver"
   },
   "options_page": "options.html",
   "icons": {
@@ -58,7 +58,7 @@
   ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "bandwidth-guardian@github.com",
+      "id": "bandwidth-saver@github.com",
       "strict_min_version": "128.0"
     }
   }

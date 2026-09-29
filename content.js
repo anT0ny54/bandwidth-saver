@@ -270,6 +270,13 @@
     if (!el || doneImg.has(el)) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
 
+    // Force lazy loading on <img> elements that don't specify it. The HTML
+    // parser sets the loading attribute natively, bypassing prehook's
+    // HTMLImageElement.prototype.loading patch, so layer 2 handles it here.
+    if (el.tagName === "IMG" && !el.hasAttribute("loading")) {
+      el.setAttribute("loading", "lazy");
+    }
+
     let rewrote = false;
 
     if (el.tagName === "IMG" || el.tagName === "SOURCE") {
@@ -364,13 +371,31 @@
     doneBg.add(el);
   }
 
-  const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]"].join(",");
+  // ── D) <link rel="preload" as="image"> rewriting ──────────────────────────
+  // Parser-created preload links bypass prehook's JS patches. Rewrite the href
+  // to the proxy URL so the preloaded bytes are compressed instead of the
+  // original full-resolution image.
+  function rewritePreload(el) {
+    if (!el || el.tagName !== "LINK") return;
+    if (!opts?.proxyBase || !opts?.enabled) return;
+    if (!/(?:^|\s)preload(?:\s|$)/i.test(el.rel || "")) return;
+    if (String(el.getAttribute("as") || "").toLowerCase() !== "image" &&
+        !/^image\//i.test(el.getAttribute("type") || "")) return;
+
+    const href = el.getAttribute("href");
+    const absolute = href ? resolveHttp(href) : null;
+    if (!absolute || shouldSkip(absolute)) return;
+    el.setAttribute("href", buildProxyUrl(absolute));
+  }
+
+  const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]", 'link[rel~="preload"]'].join(",");
 
   // ── Full-page scan ────────────────────────────────────────────────────────
   function processCandidate(el) {
     rewriteImg(el);
     rewriteLazy(el);
     rewriteBg(el);
+    rewritePreload(el);
   }
 
   function rewriteAll() {
@@ -388,6 +413,7 @@
     const imageTargets = new Set();
     const lazyTargets = new Set();
     const bgTargets = new Set();
+    const preloadTargets = new Set();
 
     for (const m of mutations) {
       if (m.type === "childList") {
@@ -407,6 +433,9 @@
         } else if (lazyAttrSet.has(m.attributeName) || m.attributeName === "data-srcset") {
           doneLazy.delete(t);
           lazyTargets.add(t);
+        } else if (m.target.tagName === "LINK" &&
+                   (m.attributeName === "href" || m.attributeName === "rel" || m.attributeName === "as")) {
+          preloadTargets.add(t);
         }
       }
     }
@@ -418,6 +447,7 @@
     imageTargets.forEach(rewriteImg);
     lazyTargets.forEach(rewriteLazy);
     bgTargets.forEach(rewriteBg);
+    preloadTargets.forEach(rewritePreload);
   }
 
   function queueMutationFlush(mutations) {
@@ -440,7 +470,7 @@
     childList:       true,
     subtree:         true,
     attributes:      true,
-    attributeFilter: ["src", "srcset", "style", ...LAZY_ATTRS, "data-srcset"]
+    attributeFilter: ["src", "srcset", "style", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as"]
   });
 
   // ── Preconnect to proxy ───────────────────────────────────────────────────

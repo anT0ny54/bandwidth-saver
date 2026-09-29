@@ -119,11 +119,25 @@
     return false;
   }
 
-  // Flush image/source elements queued while settings were loading.
+  // Flush image/source/link elements queued while settings were loading.
   function flushPending() {
     for (const el of pending) {
       pending.delete(el);
       try {
+        // <link rel="preload" as="image"> queued with a stashed original href.
+        if (el instanceof HTMLLinkElement) { processPreloadLink(el); continue; }
+        // <img>.loading values set before settings were known.
+        if (el instanceof HTMLImageElement && loadingDesc && loadingDesc.set) {
+          const pendingLoading = el.dataset.bhPendingLoading;
+          if (pendingLoading !== undefined) {
+            el.removeAttribute("data-bh-pending-loading");
+            if (!opts.enabled || !opts.proxyBase || pageExcluded) {
+              loadingDesc.set.call(el, pendingLoading);
+            } else {
+              loadingDesc.set.call(el, pendingLoading === "eager" ? "eager" : "lazy");
+            }
+          }
+        }
         const pendingSrc = el.dataset.bhPendingSrc;
         if (pendingSrc && el instanceof HTMLImageElement) {
           el.removeAttribute("data-bh-pending-src");
@@ -187,6 +201,9 @@
   const setAttr = Element.prototype.setAttribute;
   const sourceProto = HTMLSourceElement?.prototype;
   const sourceSrcsetDesc = sourceProto ? Object.getOwnPropertyDescriptor(sourceProto, "srcset") : null;
+  const loadingDesc = Object.getOwnPropertyDescriptor(imgProto, "loading");
+  const linkProto = HTMLLinkElement.prototype;
+  const linkHrefDesc = Object.getOwnPropertyDescriptor(linkProto, "href");
 
   function nativeSetSrc(el, v) { srcDesc.set.call(el, v); }
   function nativeSetSrcset(el, v) { srcsetDesc?.set?.call(el, v); }
@@ -263,6 +280,54 @@
     return buildProxyUrl(absolute);
   }
 
+  // ── <link rel="preload" as="image"> support ────────────────────────────────
+  // A preload hint makes the browser download the full-resolution image URL
+  // directly — bypassing every <img> patch. We therefore rewrite the preload's
+  // href to the proxy URL (or stash and blank it until settings are known).
+  const isImagePreloadLink = el =>
+    el instanceof HTMLLinkElement &&
+    /(?:^|\s)preload(?:\s|$)/i.test(el.rel || "") &&
+    (String(el.getAttribute("as") || "").toLowerCase() === "image" ||
+     /^image\//i.test(el.getAttribute("type") || ""));
+
+  function decidePreloadHref(original) {
+    if (!original || !String(original).trim()) return original;
+    const absolute = resolveHttp(original);
+    if (!absolute) return original;
+    // Already a proxy URL (e.g. re-processing our own write): leave it alone.
+    if (isWsrvUrl(absolute)) return original;
+    if (!ready || !opts) return null; // queue until settings are known
+    if (!opts.enabled || !opts.proxyBase) return original;
+    if (pageExcluded) return original;
+    if (skipAbsolute(absolute)) return original;
+    return buildProxyUrl(absolute);
+  }
+
+  // Called from the setAttribute patch, the link.href property patch, the
+  // MutationObserver, and flushPending. Idempotent: re-running it on a link
+  // whose href is already a proxy URL is a no-op.
+  function processPreloadLink(el) {
+    try {
+      if (!isImagePreloadLink(el)) return;
+      const stashed = el.dataset.bhPreloadHref;
+      const current = el.getAttribute("href");
+      // decidePreloadHref must see the ORIGINAL url, never "about:blank".
+      const original = stashed || current;
+      if (!original || original === "about:blank") return;
+      const decided = decidePreloadHref(original);
+      if (decided === null) {
+        // Settings not loaded yet: stash the original and drop href so the
+        // browser cannot start downloading the full-resolution image.
+        if (!stashed) el.dataset.bhPreloadHref = original;
+        pending.add(el);
+        setAttr.call(el, "href", "about:blank");
+      } else {
+        if (stashed) el.removeAttribute("data-bh-preload-href");
+        setAttr.call(el, "href", decided);
+      }
+    } catch {}
+  }
+
   // ── Patch <img>.src ────────────────────────────────────────────────────────
   Object.defineProperty(imgProto, "src", {
     configurable: true,
@@ -334,11 +399,83 @@
     });
   }
 
+  // ── Patch <img>.loading ──────────────────────────────────────────────────────
+  // Force lazy loading while the extension is active so offscreen images are
+  // never downloaded. Explicit eager requests from the page are respected so
+  // carousels / above-the-fold logic keep working.
+  if (loadingDesc && loadingDesc.set) {
+    Object.defineProperty(imgProto, "loading", {
+      configurable: true,
+      enumerable: loadingDesc.enumerable,
+      get: loadingDesc.get,
+      set(value) {
+        try {
+          const v = String(value || "").toLowerCase();
+          if (!ready || !opts) {
+            this.dataset.bhPendingLoading = v;
+            pending.add(this);
+            loadingDesc.set.call(this, "lazy");
+          } else if (!opts.enabled || !opts.proxyBase || pageExcluded) {
+            loadingDesc.set.call(this, v);
+          } else {
+            loadingDesc.set.call(this, v === "eager" ? "eager" : "lazy");
+          }
+        } catch {
+          loadingDesc.set.call(this, value);
+        }
+      }
+    });
+  }
+
+  // ── Patch <link>.href property for image preloads ──────────────────────────
+  // Direct property assignment (link.href = "...") bypasses setAttribute.
+  if (linkHrefDesc && linkHrefDesc.set) {
+    Object.defineProperty(linkProto, "href", {
+      configurable: true,
+      enumerable: linkHrefDesc.enumerable,
+      get: linkHrefDesc.get,
+      set(value) {
+        try {
+          if (isImagePreloadLink(this)) {
+            const decided = decidePreloadHref(String(value));
+            if (decided === null) {
+              this.dataset.bhPreloadHref = String(value);
+              pending.add(this);
+              linkHrefDesc.set.call(this, "about:blank");
+              return;
+            }
+            linkHrefDesc.set.call(this, decided);
+            return;
+          }
+        } catch {}
+        linkHrefDesc.set.call(this, value);
+      }
+    });
+  }
+
   // ── Patch Element.prototype.setAttribute for attribute-based src assignment ─
   Element.prototype.setAttribute = function(name, value) {
     try {
       const n = String(name).toLowerCase();
       if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
+      if (this instanceof HTMLImageElement && n === "loading") {
+        const v = String(value || "").toLowerCase();
+        if (!ready || !opts) {
+          this.dataset.bhPendingLoading = v;
+          pending.add(this);
+          return setAttr.call(this, "loading", "lazy");
+        }
+        if (!opts.enabled || !opts.proxyBase || pageExcluded) return setAttr.call(this, "loading", v);
+        return setAttr.call(this, "loading", v === "eager" ? "eager" : "lazy");
+      }
+      if (this instanceof HTMLLinkElement &&
+          (n === "href" || n === "rel" || n === "as" || n === "type")) {
+        // Let the attribute land first so isImagePreloadLink() sees the full
+        // rel/as/href combination (order of attribute sets is page-controlled).
+        setAttr.call(this, name, value);
+        processPreloadLink(this);
+        return;
+      }
       if (this instanceof HTMLImageElement && (n === "src" || n === "srcset")) {
         if (n === "src") {
           const decided = decideSrc(String(value));
@@ -372,5 +509,32 @@
     } catch {}
     return setAttr.call(this, name, value);
   };
+
+  // ── MutationObserver for <link rel="preload" as="image"> ──────────────────
+  // The HTML parser sets attributes natively, bypassing our JS patches. Watch
+  // for link elements added to the DOM and for rel/as/href/type changes.
+  const preloadObserver = new MutationObserver(mutations => {
+    for (const m of mutations) {
+      if (m.type === "childList") {
+        m.addedNodes.forEach(n => {
+          if (n.nodeType !== 1) return;
+          if (n instanceof HTMLLinkElement) processPreloadLink(n);
+          if (n.querySelectorAll) {
+            n.querySelectorAll('link[rel~="preload"]').forEach(processPreloadLink);
+          }
+        });
+      } else {
+        processPreloadLink(m.target);
+      }
+    }
+  });
+  // document exists at document_start even before documentElement is parsed;
+  // observing it with subtree covers the parser-created links that follow.
+  preloadObserver.observe(document, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["href", "rel", "as", "type"]
+  });
 
 })();

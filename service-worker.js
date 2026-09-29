@@ -7,15 +7,7 @@
 //  query parameters the substitution produces a malformed proxy URL:
 //
 //    Original URL:  https://tvguide.com/img/photo.jpg?auto=webp&width=1092
-//    DNR produces:  https://proxy.com?url=https://tvguide.com/img/photo.jpg?auto=webp&width=1092&jpeg=1
-//                                                                            ^^^^ starts a NEW query param
-//
-//  The proxy receives url= truncated at the first unencoded &, so it fetches
-//  the wrong URL. This causes silent failures on sites like tvguide.com where
-//  every image URL has query params.
-//
-//  The original MV2 extension used webRequest.onBeforeRequest + encodeURIComponent
-//  which has no this limitation. MV3 removed webRequestBlocking.
+//    DNR cannot safely encode the captured source URL for its replacement.
 //
 //  Fix: image src rewriting is now done entirely in content scripts (content.js
 //  and prehook.js) which CAN call encodeURIComponent. This is the only correct
@@ -38,7 +30,6 @@ const DEFAULTS = {
   grayscale:       true,
   maxWidth:        1280,
   excludeDomains:  "google.com gstatic.com",
-  isWebpSupported: false,
 };
 
 // Rule 1 is no longer added, but we still remove it on every refresh so any
@@ -63,20 +54,6 @@ function refreshRules() {
   });
 }
 
-// ── WebP detection ────────────────────────────────────────────────────────────
-// Uses a callback so no async/await is needed at the call site.
-function checkWebpSupport(callback) {
-  if (!self.createImageBitmap) { callback(false); return; }
-  try {
-    var webpData = "data:image/webp;base64,UklGRh4AAABXRUJQVlA4TBEAAAAvAAAAAAfQ//73v/+BiOh/AAA=";
-    fetch(webpData)
-      .then(function(r) { return r.blob(); })
-      .then(function(blob) { return self.createImageBitmap(blob); })
-      .then(function() { callback(true); })
-      .catch(function() { callback(false); });
-  } catch(e) { callback(false); }
-}
-
 // ── Local settings mirror ─────────────────────────────────────────────────────
 // Content scripts read from storage.local (key "bhOpts") rather than
 // storage.sync. Local reads take ~5 ms vs ~30-80 ms for sync — every ms saved
@@ -94,30 +71,27 @@ function mirrorToLocal() {
 chrome.runtime.onInstalled.addListener(function() {
   chrome.storage.sync.get(DEFAULTS, function(d) {
     d.proxyBase = WSRV_PROXY;
-    chrome.storage.sync.set(d);
-  });
-  checkWebpSupport(function(isWebpSupported) {
-    chrome.storage.sync.set({ isWebpSupported: isWebpSupported });
-    mirrorToLocal();
-    refreshRules();
-    updateIcon();
+    chrome.storage.sync.set(d, function() {
+      mirrorToLocal();
+      refreshRules();
+      updateIcon();
+    });
   });
 });
 
 chrome.runtime.onStartup.addListener(function() {
-  checkWebpSupport(function(isWebpSupported) {
-    chrome.storage.sync.set({ isWebpSupported: isWebpSupported });
-    mirrorToLocal();
-    refreshRules();
-    updateIcon();
-  });
+  mirrorToLocal();
+  refreshRules();
+  updateIcon();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   mirrorToLocal();
-  refreshRules();
-  if ("enabled" in changes) updateIcon();
+  if ("enabled" in changes) {
+    refreshRules();
+    updateIcon();
+  }
 });
 
 mirrorToLocal();

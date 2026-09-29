@@ -2,445 +2,613 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1120">
   <title>Bandwidth Saver — Settings</title>
   <style>
-    /* ── Brand palette ───────────────────────────────────────────────────── */
     :root {
-      --brand-a:  #1a3e99;
-      --brand-b:  #0891b2;
-      --brand-c:  #16a34a;
-      --grad: linear-gradient(135deg, var(--brand-a), var(--brand-b), var(--brand-c));
+      --brand-a: #1a3e99;
+      --brand-b: #0891b2;
+      --brand-c: #16a34a;
+      --brand-grad: linear-gradient(135deg, var(--brand-a), var(--brand-b), var(--brand-c));
 
-      --bg:     #0b1120;
-      --card:   #111827;
-      --border: #1f2d45;
-      --text:   #e2e8f0;
-      --sub:    #64748b;
-      --blue:   #0891b2;
-      --blue-a: rgba(8,145,178,.13);
-      --green:  #22c55e;
-      --green-a:rgba(34,197,94,.12);
-      --red:    #ef4444;
-      --red-a:  rgba(239,68,68,.12);
-      --off:    #374151;
-      --r:      14px;
-      --bar:    62px;
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-2: #172033;
+      --border: #263650;
+      --text: #e5edf7;
+      --muted: #8a9ab1;
+      --accent: #16a4c5;
+      --accent-soft: rgba(8,145,178,.13);
+      --ok: #22c55e;
+      --ok-soft: rgba(34,197,94,.12);
+      --warn: #f59e0b;
+      --warn-soft: rgba(245,158,11,.12);
+      --danger: #ef4444;
+      --danger-soft: rgba(239,68,68,.12);
+      --off: #3a4658;
+      --radius: 16px;
+      --control: 46px;
+      --bar-space: 82px;
     }
+
     @media (prefers-color-scheme: light) {
       :root {
-        --bg:     #f0f6ff;
-        --card:   #ffffff;
-        --border: #cdd9ef;
-        --text:   #0f172a;
-        --sub:    #64748b;
-        --blue:   #0891b2;
-        --blue-a: rgba(8,145,178,.10);
-        --green:  #15803d;
-        --green-a:rgba(21,128,61,.10);
-        --red:    #dc2626;
-        --red-a:  rgba(220,38,38,.10);
-        --off:    #94a3b8;
+        --bg: #f3f7fc;
+        --surface: #fff;
+        --surface-2: #f7f9fc;
+        --border: #d7e0ed;
+        --text: #142033;
+        --muted: #66758a;
+        --accent: #087f9a;
+        --accent-soft: rgba(8,145,178,.09);
+        --ok: #15803d;
+        --ok-soft: rgba(21,128,61,.09);
+        --danger: #dc2626;
+        --danger-soft: rgba(220,38,38,.09);
+        --off: #9aa8bb;
       }
     }
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-    html { -webkit-text-size-adjust: 100%; }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+      min-height: 100%;
+      background: var(--bg);
+    }
     body {
+      margin: 0;
+      min-width: 280px;
+      min-height: 100vh;
       background: var(--bg);
       color: var(--text);
-      font: 14px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
-      padding-bottom: calc(var(--bar) + env(safe-area-inset-bottom, 0px));
+      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      padding: 14px 12px calc(var(--bar-space) + env(safe-area-inset-bottom, 0px));
     }
-    .wrap {
-      max-width: 640px;
-      margin: 0 auto;
-      padding: 18px 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-
-    /* ── Page header ─────────────────────────────────────────────────────── */
-    .page-header {
-      display: flex; align-items: center; gap: 14px;
-      margin-bottom: 6px;
-    }
-    .shield { width: 46px; height: 46px; flex-shrink: 0; }
-    .page-header h1 {
-      font-size: 20px; font-weight: 800; letter-spacing: -.3px;
-      background: var(--grad);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-    .page-header .sub { font-size: 12px; color: var(--sub); margin-top: 2px; }
-
-    /* ── Cards ───────────────────────────────────────────────────────────── */
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--r);
-      overflow: hidden;
-    }
-    .sec-label {
-      font-size: 10px; font-weight: 700;
-      text-transform: uppercase; letter-spacing: .07em;
-      color: var(--sub); padding: 2px 2px 0;
-    }
-    .row { padding: 14px; }
-    .row + .row { border-top: 1px solid var(--border); }
-    .field-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
-    .hint { font-size: 11px; color: var(--sub); margin-top: 6px; line-height: 1.45; }
-    .hint code {
-      background: var(--blue-a); color: var(--blue);
-      padding: 1px 5px; border-radius: 4px; font-size: 10px;
-    }
-    a { color: var(--blue); text-decoration: none; }
+    button, input, textarea { font: inherit; }
+    button, a, input, textarea, summary { -webkit-tap-highlight-color: transparent; }
+    button, summary { touch-action: manipulation; }
+    button { color: inherit; }
+    a { color: var(--accent); }
     a:hover { text-decoration: underline; }
+    a:focus-visible, button:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible {
+      outline: 3px solid var(--accent-soft);
+      outline-offset: 2px;
+    }
 
-    /* ── Toggle rows ─────────────────────────────────────────────────────── */
-    .toggle-row {
-      display: flex; align-items: center;
+    .page {
+      width: 100%;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    .hero {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 4px 2px 14px;
+    }
+    .hero-icon {
+      width: 44px;
+      height: 44px;
+      flex: 0 0 44px;
+    }
+    .hero-copy { min-width: 0; }
+    .hero-title {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.15;
+      font-weight: 800;
+      letter-spacing: -.3px;
+      background: var(--brand-grad);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      color: var(--accent);
+    }
+    .hero-sub {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .section {
+      margin-top: 12px;
+    }
+    .section:first-of-type { margin-top: 0; }
+    .section-title {
+      margin: 0 4px 7px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.2;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .09em;
+    }
+    .card {
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
       justify-content: space-between;
-      gap: 10px; padding: 13px 14px;
+      gap: 14px;
+      min-height: 66px;
+      padding: 11px 14px;
       cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
       user-select: none;
     }
-    .toggle-row + .toggle-row { border-top: 1px solid var(--border); }
-    .tr-label { font-weight: 600; font-size: 13px; }
-    .tr-hint  { font-size: 11px; color: var(--sub); margin-top: 2px; }
+    .switch-row + .switch-row { border-top: 1px solid var(--border); }
+    .switch-copy { min-width: 0; }
+    .switch-title { font-size: 13px; font-weight: 700; }
+    .switch-hint { margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.4; }
+
     .switch {
-      -webkit-appearance: none; appearance: none;
-      flex-shrink: 0; width: 46px; height: 26px;
-      border-radius: 999px; background: var(--off);
-      border: none; outline: none; cursor: pointer;
-      position: relative; transition: background .18s;
+      -webkit-appearance: none;
+      appearance: none;
+      position: relative;
+      width: 48px;
+      height: 28px;
+      flex: 0 0 48px;
+      margin: 0;
+      border: 0;
+      border-radius: 999px;
+      background: var(--off);
+      cursor: pointer;
     }
     .switch::after {
-      content: ""; position: absolute; top: 3px; left: 3px;
-      width: 20px; height: 20px; border-radius: 50%;
-      background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35);
-      transition: transform .18s cubic-bezier(.4,0,.2,1);
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,.32);
+      transition: transform .15s ease;
     }
-    .switch:checked { background: var(--brand-b); }
+    .switch:checked { background: var(--accent); }
     .switch:checked::after { transform: translateX(20px); }
 
-    /* ── Inputs ──────────────────────────────────────────────────────────── */
-    .proxy-row { display: flex; gap: 7px; align-items: stretch; }
-    .proxy-row input { flex: 1; }
-    input[type="text"], input[type="number"], textarea {
-      width: 100%; min-height: 44px;
-      padding: 10px 12px;
-      background: transparent; color: var(--text);
+    .row { padding: 14px; }
+    .field-label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .hint {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+    }
+    .hint code {
+      padding: 1px 5px;
+      border-radius: 5px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 10px;
+    }
+
+    .presets {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 7px;
+    }
+    .preset {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      min-height: 52px;
+      padding: 8px 6px;
       border: 1px solid var(--border);
-      border-radius: 10px; outline: none;
-      font: max(16px,14px)/1.4 inherit;
+      border-radius: 11px;
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+      text-align: center;
+    }
+    .preset.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    .p-label { display: block; font-size: 13px; font-weight: 800; }
+    .p-hint { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; line-height: 1.2; }
+    .preset.active .p-label { color: var(--accent); }
+
+    .input {
+      display: block;
+      width: 100%;
+      min-height: var(--control);
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: var(--surface-2);
+      color: var(--text);
+      outline: 0;
+      font-size: 16px;
+      line-height: 1.35;
+    }
+    textarea.input {
+      min-height: 96px;
       resize: vertical;
-      transition: border-color .15s, box-shadow .15s;
     }
-    input:focus, textarea:focus {
-      border-color: var(--blue);
-      box-shadow: 0 0 0 3px var(--blue-a);
+    .input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-soft);
     }
-    input.invalid { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-a); }
+    .input.invalid {
+      border-color: var(--danger);
+      box-shadow: 0 0 0 3px var(--danger-soft);
+    }
     input[type="number"] { -moz-appearance: textfield; }
     input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
 
-    /* ── Preset buttons ──────────────────────────────────────────────────── */
-    .presets {
-      display: grid; gap: 7px;
-      grid-template-columns: repeat(3, 1fr);
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
     }
-    .preset {
-      -webkit-appearance: none; appearance: none;
-      border: 1.5px solid var(--border);
-      background: transparent; color: var(--text);
-      border-radius: 10px; padding: 10px 6px;
-      cursor: pointer; text-align: center;
-      transition: border-color .15s, background .15s;
-      -webkit-tap-highlight-color: transparent;
-    }
-    .preset .p-label { font-weight: 700; font-size: 13px; display: block; }
-    .preset .p-hint  { font-size: 10px; color: var(--sub); display: block; margin-top: 3px; }
-    .preset.active {
-      border-color: var(--blue);
-      background: var(--blue-a);
-      color: var(--blue);
-    }
-    .preset.active .p-hint { color: inherit; opacity: .8; }
-
-    /* ── Stats ───────────────────────────────────────────────────────────── */
-    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
     .stat {
-      background: var(--blue-a);
-      border: 1px solid rgba(8,145,178,.2);
-      border-radius: 10px; padding: 12px;
-    }
-    .stat-lbl { font-size: 10px; font-weight: 700; color: var(--sub); text-transform: uppercase; letter-spacing: .04em; }
-    .stat-val { font-size: 22px; font-weight: 800; margin-top: 4px; }
-
-    /* ── Advanced ────────────────────────────────────────────────────────── */
-    details > summary {
-      display: flex; align-items: center; gap: 6px;
-      padding: 12px 14px; list-style: none;
-      cursor: pointer; font-size: 12px; font-weight: 600; color: var(--sub);
-      -webkit-tap-highlight-color: transparent; user-select: none;
-    }
-    details > summary::before { content: "▶"; font-size: 9px; transition: transform .2s; }
-    details[open] > summary::before { transform: rotate(90deg); }
-    .adv-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 14px; }
-    .adv-row { display: flex; align-items: center; gap: 8px; }
-    .adv-row input { max-width: 100px; min-height: 40px; }
-    .adv-row label { font-size: 12px; font-weight: 600; color: var(--sub); white-space: nowrap; }
-
-    /* ── Buttons ─────────────────────────────────────────────────────────── */
-    .btn {
-      -webkit-appearance: none; appearance: none;
-      display: inline-flex; align-items: center; justify-content: center; gap: 5px;
-      min-height: 44px; padding: 0 16px;
-      border-radius: 10px; font-size: 13px; font-weight: 600; cursor: pointer;
+      min-width: 0;
+      padding: 12px;
       border: 1px solid var(--border);
-      background: transparent; color: var(--text);
-      transition: opacity .12s, transform .1s;
-      -webkit-tap-highlight-color: transparent;
-      white-space: nowrap;
+      border-radius: 12px;
+      background: var(--surface-2);
     }
-    .btn:active   { transform: scale(.97); opacity: .75; }
-    .btn:disabled { opacity: .35; cursor: default; transform: none; }
-    .btn.primary  { background: var(--grad); border: none; color: #fff; }
-    .btn.ghost    { background: transparent; }
-    .btn.test     { flex-shrink: 0; }
-    .btn-row      { display: flex; gap: 8px; flex-wrap: wrap; }
+    .stat-label {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    .stat-value {
+      margin-top: 3px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-size: 20px;
+      line-height: 1.15;
+      font-weight: 800;
+    }
 
-    /* ── Sticky save bar ─────────────────────────────────────────────────── */
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 11px;
+    }
+    .btn {
+      -webkit-appearance: none;
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      min-width: 0;
+      padding: 0 14px;
+      border: 1px solid var(--border);
+      border-radius: 11px;
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      text-align: center;
+    }
+    .btn:active { opacity: .78; }
+    .btn:disabled { opacity: .42; cursor: default; }
+    .btn.primary {
+      border-color: transparent;
+      background: var(--brand-grad);
+      color: #fff;
+    }
+    .btn.full { width: 100%; }
+
+    details { margin: 0; }
+    summary {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 48px;
+      padding: 0 14px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }
+    summary::-webkit-details-marker { display: none; }
+    summary::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-right: 1.5px solid currentColor;
+      border-bottom: 1.5px solid currentColor;
+      transform: rotate(-45deg);
+    }
+    details[open] summary { border-bottom: 1px solid var(--border); }
+    details[open] summary::before { transform: rotate(45deg); }
+    .advanced-body {
+      display: grid;
+      gap: 14px;
+      padding: 14px;
+    }
+    .advanced-item + .advanced-item { border-top: 1px solid var(--border); padding-top: 14px; }
+    .advanced-label { margin-bottom: 6px; font-size: 12px; font-weight: 700; }
+
+    .source {
+      padding: 12px 14px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .source-link { display: inline-block; margin-top: 3px; }
+    .version {
+      display: inline-block;
+      margin-top: 7px;
+      padding: 3px 7px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 10px;
+      font-weight: 800;
+    }
+
     .action-bar {
-      position: fixed; bottom: 0; left: 0; right: 0;
-      height: var(--bar);
-      padding: 8px 14px env(safe-area-inset-bottom, 8px);
+      position: fixed;
+      z-index: 20;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
       border-top: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: flex-end; gap: 8px;
-      background: var(--card);
+      background: var(--surface);
     }
-    @supports (backdrop-filter: blur(10px)) {
-      .action-bar { background: rgba(17,24,39,.9); backdrop-filter: blur(10px); }
-      @media (prefers-color-scheme: light) { .action-bar { background: rgba(255,255,255,.92); } }
+    .action-inner {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px;
+      width: 100%;
+      max-width: 680px;
+      margin: 0 auto;
     }
-    .action-bar .btn { min-width: 100px; }
+    .action-inner .btn { width: 100%; }
 
-    /* ── Toast ───────────────────────────────────────────────────────────── */
     .toast {
       position: fixed;
-      left: 50%; bottom: calc(var(--bar) + 10px);
-      transform: translateX(-50%) translateY(6px);
-      background: var(--card); border: 1px solid var(--border);
-      color: var(--text); padding: 9px 16px;
-      border-radius: 9px; font-size: 12px; font-weight: 500;
-      opacity: 0; pointer-events: none;
-      transition: opacity .18s, transform .18s;
-      box-shadow: 0 4px 16px rgba(0,0,0,.3);
-      white-space: nowrap; max-width: 90vw; text-align: center; z-index: 99;
+      z-index: 30;
+      right: 12px;
+      bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+      left: 12px;
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 10px 13px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 8px 28px rgba(0,0,0,.2);
+      text-align: center;
+      font-size: 12px;
+      font-weight: 700;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(7px);
+      transition: opacity .15s ease, transform .15s ease;
     }
-    .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-    .toast.ok   { background: var(--green-a); color: var(--green); border-color: rgba(34,197,94,.3); }
-    .toast.err  { background: var(--red-a);   color: var(--red);   border-color: rgba(239,68,68,.3); }
-    .toast.warn { background: rgba(245,158,11,.12); color: #b45309; border-color: rgba(245,158,11,.3); }
-    @media (prefers-color-scheme: light) { .toast.warn { color: #92400e; } }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.ok { border-color: rgba(34,197,94,.35); background: var(--ok-soft); color: var(--ok); }
+    .toast.err { border-color: rgba(239,68,68,.35); background: var(--danger-soft); color: var(--danger); }
+    .toast.warn { border-color: rgba(245,158,11,.35); background: var(--warn-soft); color: #b45309; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; }
+    }
+
+    @media (min-width: 560px) {
+      body { padding-right: 18px; padding-left: 18px; }
+      .page { max-width: 720px; }
+      .action-inner { max-width: 720px; }
+      .toast { max-width: 560px; }
+    }
+
+    @media (max-width: 359px) {
+      .presets { grid-template-columns: 1fr; }
+      .preset { min-height: 46px; text-align: left; padding: 8px 12px; }
+      .p-label, .p-hint { display: inline; }
+      .p-hint { margin-left: 5px; }
+    }
   </style>
 </head>
 <body>
-<div class="wrap">
+  <main class="page">
+    <header class="hero">
+      <svg class="hero-icon" viewBox="0 0 44 44" fill="none" aria-hidden="true">
+        <defs>
+          <linearGradient id="logoGradient" x1="2" y1="2" x2="42" y2="42" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#1a3e99"/>
+            <stop offset=".52" stop-color="#0891b2"/>
+            <stop offset="1" stop-color="#22c55e"/>
+          </linearGradient>
+        </defs>
+        <path d="M22 3 40 9.5v12.8c0 9.7-7.8 16.5-18 18.7C12 38.8 4 32 4 22.3V9.5L22 3Z" fill="url(#logoGradient)"/>
+        <path d="m9 32 7.1-12 4.5 6.3L27 14l8 18" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".92"/>
+        <path d="m12 29 10-5 9 3" stroke="#fff" stroke-width="1.7" stroke-linecap="round" opacity=".84"/>
+        <circle cx="12" cy="29" r="2.2" fill="#fff" opacity=".94"/>
+        <circle cx="22" cy="24" r="2.2" fill="#fff" opacity=".94"/>
+        <circle cx="31" cy="27" r="2.2" fill="#fff" opacity=".94"/>
+      </svg>
+      <div class="hero-copy">
+        <h1 class="hero-title">Bandwidth Saver</h1>
+        <div class="hero-sub">Mobile-first image compression settings</div>
+      </div>
+    </header>
 
-  <div class="page-header">
-    <svg class="shield" viewBox="0 0 46 46" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id="g" x1="0" y1="0" x2="46" y2="46" gradientUnits="userSpaceOnUse">
-          <stop offset="0%"   stop-color="#1a3e99"/>
-          <stop offset="50%"  stop-color="#0891b2"/>
-          <stop offset="100%" stop-color="#22c55e"/>
-        </linearGradient>
-      </defs>
-      <path d="M23 3 L42 10 L42 23 C42 33 33 41 23 44 C13 41 4 33 4 23 L4 10 Z"
-            fill="url(#g)"/>
-      <polyline points="9,34 17,20 22,27 29,15 37,34"
-                fill="none" stroke="white" stroke-width="2.2"
-                stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>
-      <line x1="12" y1="31" x2="24" y2="24" stroke="white" stroke-width="1.8" opacity="0.85"/>
-      <line x1="24" y1="24" x2="34" y2="28" stroke="white" stroke-width="1.8" opacity="0.85"/>
-      <circle cx="12" cy="31" r="2.5" fill="white" opacity="0.9"/>
-      <circle cx="24" cy="24" r="2.5" fill="white" opacity="0.9"/>
-      <circle cx="34" cy="28" r="2.5" fill="white" opacity="0.9"/>
-    </svg>
-    <div>
-      <h1>Bandwidth Saver</h1>
-      <div class="sub">Compress images through wsrv.nl on-the-fly image cache, resizing, and compression CDN powered by Nginx, libvips, and Cloudflare</div>
-    </div>
-  </div>
+    <section class="section">
+      <h2 class="section-title">Compression</h2>
+      <div class="card">
+        <label class="switch-row" for="enabled">
+          <span class="switch-copy">
+            <span class="switch-title">Enable compression</span>
+            <span class="switch-hint">Route images through the proxy</span>
+          </span>
+          <input type="checkbox" id="enabled" class="switch">
+        </label>
+        <label class="switch-row" for="grayscale">
+          <span class="switch-copy">
+            <span class="switch-title">Grayscale</span>
+            <span class="switch-hint">Convert images to B&amp;W to reduce data</span>
+          </span>
+          <input type="checkbox" id="grayscale" class="switch">
+        </label>
+      </div>
+    </section>
 
-  <!-- Enable + Grayscale -->
-  <div class="sec-label">Compression</div>
-  <div class="card">
-    <label class="toggle-row" for="enabled">
-      <div>
-        <div class="tr-label">Enable compression</div>
-        <div class="tr-hint">Route all images through your proxy</div>
-      </div>
-      <input type="checkbox" id="enabled" class="switch">
-    </label>
-    <label class="toggle-row" for="grayscale">
-      <div>
-        <div class="tr-label">Grayscale</div>
-        <div class="tr-hint">Proxy converts images to B&amp;W — uses less data</div>
-      </div>
-      <input type="checkbox" id="grayscale" class="switch">
-    </label>
-  </div>
-
-  <!-- Quality -->
-  <div class="sec-label">Quality</div>
-  <div class="card">
-    <div class="row">
-      <div class="presets" id="qualityPresets">
-        <button class="preset" data-q="20" type="button">
-          <span class="p-label">Small</span>
-          <span class="p-hint">Saves most data</span>
-        </button>
-        <button class="preset" data-q="40" type="button">
-          <span class="p-label">Normal</span>
-          <span class="p-hint">Recommended</span>
-        </button>
-        <button class="preset" data-q="80" type="button">
-          <span class="p-label">Sharp</span>
-          <span class="p-hint">Best quality</span>
-        </button>
-      </div>
-      <div class="hint" style="margin-top:8px">Reload the page after changing quality.</div>
-    </div>
-  </div>
-
-  <!-- Max image width -->
-  <div class="sec-label">Max image width</div>
-  <div class="card">
-    <div class="row">
-      <div class="presets" id="widthPresets">
-        <button class="preset" data-w="1280" type="button">
-          <span class="p-label">HD</span>
-          <span class="p-hint">1280 px</span>
-        </button>
-        <button class="preset" data-w="1920" type="button">
-          <span class="p-label">Full HD</span>
-          <span class="p-hint">1920 px</span>
-        </button>
-        <button class="preset" data-w="0" type="button">
-          <span class="p-label">No limit</span>
-          <span class="p-hint">Original size</span>
-        </button>
-      </div>
-      <div class="hint" style="margin-top:8px">Images wider than this are scaled down before compressing.</div>
-    </div>
-  </div>
-
-  <!-- Image proxy -->
-  <div class="sec-label">Image proxy</div>
-  <div class="card">
-    <div class="row">
-      <div class="field-label">wsrv.nl</div>
-      <div class="hint" style="margin-top:0">
-        Images are rewritten to <code>https://wsrv.nl/</code> before the browser downloads them.
-        The original image URL is URL-encoded and sent as <code>url=…</code> together with
-        <code>quality</code>, <code>bw</code>, <code>jpeg</code> and <code>max_width</code>.
-        wsrv.nl equivalents are added automatically so quality, grayscale and max-width
-        are applied by the image service.
-      </div>
-      <div class="hint">
-        <a href="https://wsrv.nl/docs/" target="_blank" rel="noopener">wsrv.nl documentation</a>
-      </div>
-    </div>
-  </div>
-
-  <!-- Excluded sites -->
-  <div class="sec-label">Excluded sites</div>
-  <div class="card">
-    <div class="row">
-      <label class="field-label" for="excludeDomains">Skip these domains</label>
-      <textarea id="excludeDomains" rows="3"
-                placeholder="google.com gstatic.com example.com"></textarea>
-      <div class="hint">Space or comma separated. Images on or from these domains bypass the proxy.</div>
-    </div>
-  </div>
-
-  <!-- Stats -->
-  <div class="sec-label">Usage stats</div>
-  <div class="card">
-    <div class="row">
-      <div class="stats">
-        <div class="stat">
-          <div class="stat-lbl">Images</div>
-          <div class="stat-val" id="statImages">—</div>
-        </div>
-        <div class="stat">
-          <div class="stat-lbl">Proxy bytes</div>
-          <div class="stat-val" id="statBytes">—</div>
-        </div>
-      </div>
-      <div class="hint" style="margin-top:8px">
-        Counts bytes received from wsrv.nl when the browser loads processed images.
-      </div>
-      <div class="btn-row" style="margin-top:10px">
-        <button id="resetStats" class="btn ghost" type="button">Reset stats</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Advanced -->
-  <div class="card">
-    <details>
-      <summary>Advanced</summary>
-      <div class="adv-body">
-        <div>
-          <div class="field-label" style="font-size:12px;margin-bottom:6px">Custom quality (1–100)</div>
-          <div class="adv-row">
-            <input id="customQuality" type="number" min="1" max="100" step="1"
-                   placeholder="e.g. 55" inputmode="numeric">
-            <label for="customQuality" style="color:var(--sub);font-size:11px">
-              Overrides the preset above
-            </label>
+    <section class="section">
+      <h2 class="section-title">Quality</h2>
+      <div class="card">
+        <div class="row">
+          <div class="presets" id="qualityPresets">
+            <button class="preset" data-q="20" type="button">
+              <span class="p-label">Small</span>
+              <span class="p-hint">Most saving</span>
+            </button>
+            <button class="preset" data-q="40" type="button">
+              <span class="p-label">Normal</span>
+              <span class="p-hint">Balanced</span>
+            </button>
+            <button class="preset" data-q="80" type="button">
+              <span class="p-label">Sharp</span>
+              <span class="p-hint">More detail</span>
+            </button>
           </div>
+          <div class="hint">Reload the current page after changing quality.</div>
         </div>
-        <div>
-          <div class="field-label" style="font-size:12px;margin-bottom:6px">Custom max width (px, 0 = no limit)</div>
-          <div class="adv-row">
-            <input id="customWidth" type="number" min="0" step="10"
-                   placeholder="e.g. 1440" inputmode="numeric">
-            <label for="customWidth" style="color:var(--sub);font-size:11px">
-              Overrides the preset above
-            </label>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2 class="section-title">Maximum image width</h2>
+      <div class="card">
+        <div class="row">
+          <div class="presets" id="widthPresets">
+            <button class="preset" data-w="1280" type="button">
+              <span class="p-label">HD</span>
+              <span class="p-hint">1280 px</span>
+            </button>
+            <button class="preset" data-w="1920" type="button">
+              <span class="p-label">Full HD</span>
+              <span class="p-hint">1920 px</span>
+            </button>
+            <button class="preset" data-w="0" type="button">
+              <span class="p-label">No limit</span>
+              <span class="p-hint">Original size</span>
+            </button>
+          </div>
+          <div class="hint">Larger images are resized before compression.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2 class="section-title">Image proxy</h2>
+      <div class="card">
+        <div class="row">
+          <div class="field-label">wsrv.nl</div>
+          <div class="hint" style="margin-top:0">
+            Images are rewritten to <code>https://wsrv.nl/</code> before download.
+            The original URL is sent with the selected quality, grayscale, and max-width options, then returned as WebP with 1-day browser caching.
+          </div>
+          <div class="hint">
+            <a href="https://wsrv.nl/docs/" target="_blank" rel="noopener noreferrer">Open wsrv.nl documentation</a>
           </div>
         </div>
       </div>
-    </details>
-  </div>
+    </section>
 
-  <!-- Source -->
-  <div class="card">
-    <div class="row" style="font-size:13px">
-      Source →
-      <a href="https://github.com/anT0ny54/bandwidth-saver" target="_blank" rel="noopener">
-        github.com/anT0ny54/bandwidth-saver
-      </a>
-      &nbsp;·&nbsp; v0.0.2
+    <section class="section">
+      <h2 class="section-title">Excluded sites</h2>
+      <div class="card">
+        <div class="row">
+          <label class="field-label" for="excludeDomains">Skip these domains</label>
+          <textarea id="excludeDomains" class="input" rows="3" placeholder="google.com, gstatic.com, example.com"></textarea>
+          <div class="hint">Space or comma separated. Matching sites bypass the proxy.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2 class="section-title">Usage</h2>
+      <div class="card">
+        <div class="row">
+          <div class="stats">
+            <div class="stat">
+              <div class="stat-label">Images</div>
+              <div class="stat-value" id="statImages">—</div>
+            </div>
+            <div class="stat">
+              <div class="stat-label">Proxy bytes</div>
+              <div class="stat-value" id="statBytes">—</div>
+            </div>
+          </div>
+          <div class="hint">Counts bytes received from wsrv.nl for processed images.</div>
+          <div class="button-row">
+            <button id="resetStats" class="btn" type="button">Reset stats</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="card">
+        <details>
+          <summary>Advanced settings</summary>
+          <div class="advanced-body">
+            <div class="advanced-item">
+              <div class="advanced-label">Custom quality (1–100)</div>
+              <input id="customQuality" class="input" type="number" min="1" max="100" step="1" placeholder="e.g. 55" inputmode="numeric">
+              <div class="hint">Overrides the quality preset when a valid value is entered.</div>
+            </div>
+            <div class="advanced-item">
+              <div class="advanced-label">Custom max width (px, 0 = no limit)</div>
+              <input id="customWidth" class="input" type="number" min="0" step="10" placeholder="e.g. 1440" inputmode="numeric">
+              <div class="hint">Overrides the width preset when a valid value is entered.</div>
+            </div>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="card source">
+        <div>Source</div>
+        <a class="source-link" href="https://github.com/anT0ny54/bandwidth-saver" target="_blank" rel="noopener noreferrer">github.com/anT0ny54/bandwidth-saver</a>
+        <div id="extensionVersion" class="version">v—</div>
+      </div>
+    </section>
+  </main>
+
+  <div class="action-bar">
+    <div class="action-inner">
+      <button id="resetAll" class="btn" type="button">Reset defaults</button>
+      <button id="save" class="btn primary" type="button">Save changes</button>
     </div>
   </div>
 
-</div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-<div class="action-bar">
-  <button id="resetAll" class="btn ghost"    type="button">Reset defaults</button>
-  <button id="save"     class="btn primary"  type="button">Save</button>
-</div>
-
-<div id="toast" class="toast" role="status" aria-live="polite"></div>
-
-<script type="module" src="options.js"></script>
+  <script type="module" src="options.js"></script>
 </body>
 </html>

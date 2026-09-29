@@ -14,7 +14,7 @@ It is designed to work conservatively: image interception happens early, while b
 - **Quality control** — configurable image quality.
 - **Maximum width** — optionally limits oversized images before delivery.
 - **Grayscale mode** — optionally requests grayscale images through the proxy.
-- **JPEG option** — supported without forcing JPEG output globally.
+- **WebP output** — eligible images are delivered as WebP for efficient transfer.
 - **Double-proxy protection** — already processed proxy URLs are never wrapped again.
 - **`src` support** — handles normal HTML and JavaScript-assigned image URLs.
 - **`srcset` support** — rewrites image URLs without taking over the browser's candidate selection.
@@ -63,6 +63,8 @@ Web page
           ▼
    Browser
 ```
+
+Proxy requests use wsrv.nl's native `q`, `w`, `fit`, `we`, `filt`, `maxage`, `page`, `n`, and `output=webp` parameters.
 
 The extension does **not** wait for an image to finish downloading before deciding whether to proxy it. This is important because waiting for `naturalWidth`, image load events, or similar information can defeat the purpose of bandwidth saving.
 
@@ -191,6 +193,7 @@ Do not change the working proxy URL construction without testing:
 - grayscale
 - quality
 - maximum width
+- WebP output
 - already-proxied URLs
 
 ## 4. Double-proxy protection
@@ -254,6 +257,32 @@ bandwidth-guardian/
 ---
 
 
-# 📄 License
+## 🌐 Free DNS Services
 
-MIT — see [LICENSE](LICENSE).
+High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
+
+| Blocklist | DNS-over-HTTPS (DoH) |
+| :--- | :--- |
+| Multi Pro + TIF | `https://freedns.koyeb.app/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dns-pi.vercel.app/api/doh/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
+| Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not used in 15 minutes) |
+| Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not used in 15 minutes) |
+
+## ⚡ Bandwidth Hero Server
+
+A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
+
+Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
+
+🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
+
+## Supporting the Project
+
+If you find this project useful, donations are appreciated:
+
+- **Bitcoin**: `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
+
+## License
+
+See [`LICENSE`](LICENSE).

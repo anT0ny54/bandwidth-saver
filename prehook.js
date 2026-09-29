@@ -8,7 +8,7 @@
   // Minimal fallback used only when the local settings mirror is unavailable.
   const defaults = {
     enabled: true, proxyBase: WSRV_PROXY, quality: 40, grayscale: true,
-    maxWidth: 1280, excludeDomains: "google.com gstatic.com", isWebpSupported: false
+    maxWidth: 1280, excludeDomains: "google.com gstatic.com"
   };
 
   let opts = null;        // loaded options (null until storage responds)
@@ -17,15 +17,21 @@
   let proxyConfig = null;
   const pageHost = location.hostname.toLowerCase();
   const pending = new Set(); // <img>/<source> elements waiting for opts to be ready
-  const srcsetCache = new WeakMap();
+  let srcsetCache = new WeakMap();
 
-  const safeURL = u => { try { return new URL(u); } catch { return null; } };
+  const safeURL = (u, base = document.baseURI) => {
+    try { return new URL(u, base); } catch { return null; }
+  };
+  const resolveHttp = u => {
+    const resolved = safeURL(u);
+    return resolved && /^https?:$/.test(resolved.protocol) ? resolved.href : null;
+  };
   const toDomainSet = text => new Set(
     String(text || "")
       .split(/[, \n\r\t]+/)
       .map(s => s.trim().toLowerCase())
       .filter(Boolean)
-      .map(s => s.replace(/^https?:\/\//, "").split("/")[0])
+      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""))
   );
   const isHttp = u => /^https?:\/\//i.test(u);
   const TINY_URL_RE = /(?:^|[._\/-])(1x1|2x2|pixel|spacer|tracking)(?:[._\/-]|$)/i;
@@ -42,53 +48,44 @@
     if (!base) { proxyConfig = null; return; }
     const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 40) || 40));
     const maxWidth = Number(opts.maxWidth) || 0;
-    const jpeg = opts.isWebpSupported ? "0" : "1";
     proxyConfig = { base, sep: base.includes("?") ? "&" : "?", quality,
-      bw: opts.grayscale ? "1" : "0", jpeg,
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
   }
 
   function buildProxyUrl(orig) {
     if (!proxyConfig || !isHttp(orig)) return orig;
 
-    const { base, sep, quality, bw, jpeg, maxWidth, grayscale } = proxyConfig;
+    const { base, sep, quality, maxWidth, grayscale } = proxyConfig;
     const parts = [
-      // Bandwidth Guardian proxy-compatible parameters requested by the user.
-      "url="       + encodeURIComponent(orig),
-      "quality="   + quality,
-      "bw="        + bw,
-      "jpeg="      + jpeg
+      "url=" + encodeURIComponent(orig),
+      "q=" + quality
     ];
 
     if (maxWidth) {
-      parts.push("max_width=" + maxWidth);
-    }
-
-    // Native wsrv.nl equivalents. Keeping both sets makes the generated URL
-    // compatible with the requested interface while ensuring wsrv actually
-    // performs the requested transformations.
-    parts.push("q=" + quality);
-
-    if (maxWidth) {
       // Preserve aspect ratio and never enlarge smaller images.
-      parts.push("w=" + maxWidth);
-      parts.push("fit=inside");
-      parts.push("we");
+      parts.push("w=" + maxWidth, "fit=inside", "we");
     }
 
     if (grayscale) {
       parts.push("filt=greyscale");
     }
 
-    if (jpeg === "1") {
-      parts.push("output=jpg");
-    }
+    // wsrv.nl supports these natively; keep animated/multi-page inputs intact
+    // while delivering a browser-friendly WebP response.
+    parts.push("maxage=1d", "page=-1", "n=-1", "output=webp");
 
     return base + sep + parts.join("&");
   }
 
   function excludedHost(host) {
-    return excludedDomains.has(String(host || "").toLowerCase());
+    let h = String(host || "").toLowerCase().replace(/\.$/, "");
+    while (h) {
+      if (excludedDomains.has(h)) return true;
+      const dot = h.indexOf(".");
+      if (dot < 0) break;
+      h = h.slice(dot + 1);
+    }
+    return false;
   }
 
   // Flush image/source elements queued while settings were loading.
@@ -128,6 +125,7 @@
     } else {
       chrome.storage.sync.get(defaults, synced => {
         updateProxyConfig({ ...synced, proxyBase: WSRV_PROXY });
+        srcsetCache = new WeakMap();
         excludedDomains = toDomainSet(opts.excludeDomains);
         ready = true;
         flushPending();
@@ -144,11 +142,13 @@
   chrome.storage.onChanged?.addListener((changes, area) => {
     if (area === "local" && changes.bhOpts) {
       updateProxyConfig({ ...(changes.bhOpts.newValue || defaults), proxyBase: WSRV_PROXY });
+      srcsetCache = new WeakMap();
       excludedDomains = toDomainSet(opts.excludeDomains);
       ready = true;
     } else if (area === "sync") {
       chrome.storage.sync.get(defaults, synced => {
         updateProxyConfig({ ...synced, proxyBase: WSRV_PROXY });
+        srcsetCache = new WeakMap();
         excludedDomains = toDomainSet(opts.excludeDomains);
         ready = true;
         chrome.storage.local.set({ bhOpts: synced });
@@ -170,7 +170,7 @@
 
   function rewriteSrcset(ss, el) {
     if (!ss) return ss;
-    if (excludedDomains.has(pageHost)) return ss;
+    if (excludedHost(pageHost)) return ss;
 
     if (el) {
       const cached = srcsetCache.get(el);
@@ -184,10 +184,12 @@
       const m = part.trim().match(/^(\S+)(\s+.+)?$/);
       if (!m) continue;
       const url = m[1];
-      if (!isHttp(url) || isWsrvUrl(url) || SVG_URL_RE.test(url) || isTinyOrTracking(url.toLowerCase())) continue;
-      const u = safeURL(url);
+      const absolute = resolveHttp(url);
+      if (!absolute || isWsrvUrl(absolute) || SVG_URL_RE.test(absolute) ||
+          isTinyOrTracking(absolute.toLowerCase())) continue;
+      const u = safeURL(absolute);
       if (!u || (opts && excludedHost(u.hostname))) continue;
-      parts[i] = buildProxyUrl(url) + (m[2] || "");
+      parts[i] = buildProxyUrl(absolute) + (m[2] || "");
       touched = true;
     }
     const output = touched ? parts.join(", ") : ss;
@@ -196,20 +198,19 @@
   }
 
   function decideSrc(original) {
-    if (!isHttp(original)) return original;
+    const absolute = resolveHttp(original);
+    if (!absolute) return original;
     // Never proxy a URL that is already produced by wsrv.nl. This is important
     // because content.js also rewrites parser-created images; without this guard
     // the prehook wraps the wsrv URL a second time.
-    if (isWsrvUrl(original)) return original;
-    if (excludedDomains.has(pageHost)) return original;
-    if (isTinyOrTracking(original.toLowerCase()) || /\.svg(?:[?#]|$)/i.test(original)) return original;
-    const u = safeURL(original);
-    if (!u) return original;
-    if (opts && excludedHost(u.hostname)) return original;
-    if (!ready || !opts || !opts.proxyBase) {
-      return null; // signal to queue this element
-    }
-    return buildProxyUrl(original);
+    if (isWsrvUrl(absolute)) return original;
+    if (!ready || !opts) return null; // queue until settings are known
+    if (!opts.enabled || !opts.proxyBase) return original;
+    if (excludedHost(pageHost)) return original;
+    if (isTinyOrTracking(absolute.toLowerCase()) || /\.svg(?:[?#]|$)/i.test(absolute)) return original;
+    const u = safeURL(absolute);
+    if (!u || excludedHost(u.hostname)) return original;
+    return buildProxyUrl(absolute);
   }
 
   // ── Patch <img>.src ────────────────────────────────────────────────────────
@@ -242,10 +243,12 @@
       set(value) {
         try {
           const v = String(value || "");
-          if (!ready || !opts || !opts.proxyBase) {
+          if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
             nativeSetSrcset(this, "");
+          } else if (!opts.enabled || !opts.proxyBase) {
+            nativeSetSrcset(this, v);
           } else {
             nativeSetSrcset(this, rewriteSrcset(v, this));
           }
@@ -265,10 +268,12 @@
       set(value) {
         try {
           const v = String(value || "");
-          if (!ready || !opts || !opts.proxyBase) {
+          if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
             nativeSourceSetSrcset(this, "");
+          } else if (!opts.enabled || !opts.proxyBase) {
+            nativeSourceSetSrcset(this, v);
           } else {
             nativeSourceSetSrcset(this, rewriteSrcset(v, this));
           }
@@ -294,21 +299,23 @@
           return setAttr.call(this, "src", decided);
         } else if (n === "srcset") {
           const v = String(value || "");
-          if (!ready || !opts || !opts.proxyBase) {
+          if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
             return setAttr.call(this, "srcset", "");
           }
+          if (!opts.enabled || !opts.proxyBase) return setAttr.call(this, "srcset", v);
           return setAttr.call(this, "srcset", rewriteSrcset(v, this));
         }
       }
       if (this instanceof HTMLSourceElement && n === "srcset") {
         const v = String(value || "");
-        if (!ready || !opts || !opts.proxyBase) {
+        if (!ready || !opts) {
           this.dataset.bhPendingSrcset = v;
           pending.add(this);
           return setAttr.call(this, "srcset", "");
         }
+        if (!opts.enabled || !opts.proxyBase) return setAttr.call(this, "srcset", v);
         return setAttr.call(this, "srcset", rewriteSrcset(v, this));
       }
     } catch {}

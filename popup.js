@@ -6,6 +6,8 @@ const enabledEl   = $("enabled");
 const grayscaleEl = $("grayscale");
 const ctrlCard    = $("ctrlCard");
 const headerSub   = $("headerSub");
+const statusState = $("statusState");
+const statusText  = $("statusText");
 const nudge       = $("nudge");
 const reloadBtn   = $("reloadBtn");
 const siteNameEl  = $("siteName");
@@ -26,6 +28,10 @@ function parseDomains(text) {
     .split(/[,\s]+/)
     .map(s => s.trim().toLowerCase()).filter(Boolean)
     .map(s => s.replace(/^https?:\/\//, "").split("/")[0]);
+}
+
+function findExcludedDomain(host, domains) {
+  return domains.find(domain => host === domain || host.endsWith(`.${domain}`)) || "";
 }
 
 function nearestPreset(q) {
@@ -56,6 +62,8 @@ function updateEnabledUI(enabled) {
   // separate card above and stays fully interactive at all times.
   ctrlCard.classList.toggle("card-dim", !enabled);
   headerSub.textContent = enabled ? "Active" : "Disabled";
+  statusState.classList.toggle("active", enabled);
+  statusText.textContent = enabled ? "Compression active" : "Compression disabled";
 }
 
 // ── Load ──────────────────────────────────────────────────────────────────────
@@ -77,7 +85,7 @@ enabledEl.addEventListener("change", async () => {
 });
 
 // ── Grayscale ─────────────────────────────────────────────────────────────────
-// Grayscale is applied server-side by the proxy (bw param). Images already on
+// Grayscale is applied server-side by the proxy (filt=greyscale). Images already on
 // the page can't change without a reload.
 
 grayscaleEl.addEventListener("change", async () => {
@@ -138,7 +146,7 @@ async function loadSiteUI(d) {
   excludeBtn.disabled = false;
 
   const excluded = parseDomains(d.excludeDomains);
-  if (excluded.includes(currentHost)) {
+  if (findExcludedDomain(currentHost, excluded)) {
     sitePillEl.textContent = "Excluded";
     sitePillEl.className   = "site-pill excluded";
     sitePillEl.style.display = "";
@@ -155,7 +163,8 @@ excludeBtn.addEventListener("click", async () => {
   if (!currentIsWeb || !currentHost) return;
   const d    = await chrome.storage.sync.get(DEFAULTS);
   const list = new Set(parseDomains(d.excludeDomains));
-  if (list.has(currentHost)) list.delete(currentHost);
+  const excludedDomain = findExcludedDomain(currentHost, Array.from(list));
+  if (excludedDomain) list.delete(excludedDomain);
   else list.add(currentHost);
   await chrome.storage.sync.set({ excludeDomains: Array.from(list).join(" ") });
   loadSiteUI(await chrome.storage.sync.get(DEFAULTS));

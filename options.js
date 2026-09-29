@@ -11,6 +11,7 @@ const resetStatsBtn  = $("resetStats");
 const statImagesEl   = $("statImages");
 const statBytesEl    = $("statBytes");
 const toastEl        = $("toast");
+const versionEl       = $("extensionVersion");
 const customQualityEl = $("customQuality");
 const customWidthEl   = $("customWidth");
 
@@ -19,6 +20,10 @@ const widthPresets   = Array.from(document.querySelectorAll("#widthPresets  .pre
 
 const QUALITY_PRESETS = [20, 40, 80];
 const WIDTH_PRESETS   = [1280, 1920, 0];
+
+if (versionEl) {
+  versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
+}
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 
@@ -155,7 +160,6 @@ grayscaleEl.addEventListener("change", async () => {
 
 async function save() {
   await chrome.storage.sync.set({
-    proxyBase:      "https://wsrv.nl/",
     quality:        readQuality(),
     maxWidth:       readWidth(),
     excludeDomains: (excludeEl.value || "").trim(),

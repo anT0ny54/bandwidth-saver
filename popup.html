@@ -2,302 +2,403 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1120">
   <title>Bandwidth Saver</title>
   <style>
-    /* ── Brand palette — drawn from logo gradient ────────────────────────── */
     :root {
-      --brand-a:  #1a3e99;   /* deep navy  */
-      --brand-b:  #0891b2;   /* cyan-teal  */
-      --brand-c:  #16a34a;   /* guardian green */
-      --grad: linear-gradient(135deg, var(--brand-a), var(--brand-b), var(--brand-c));
+      --brand-a: #1a3e99;
+      --brand-b: #0891b2;
+      --brand-c: #16a34a;
+      --brand-grad: linear-gradient(135deg, var(--brand-a), var(--brand-b), var(--brand-c));
 
-      --bg:     #0b1120;
-      --card:   #111827;
-      --border: #1f2d45;
-      --text:   #e2e8f0;
-      --sub:    #64748b;
-      --blue:   #3b82f6;
-      --green:  #22c55e;
-      --red:    #ef4444;
-      --off:    #374151;
-      --r:      14px;
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-2: #172033;
+      --border: #263650;
+      --text: #e5edf7;
+      --muted: #8a9ab1;
+      --accent: #16a4c5;
+      --accent-soft: rgba(8,145,178,.13);
+      --danger: #ef4444;
+      --danger-soft: rgba(239,68,68,.12);
+      --off: #3a4658;
+      --radius: 15px;
     }
+
     @media (prefers-color-scheme: light) {
       :root {
-        --bg:    #f0f6ff;
-        --card:  #ffffff;
-        --border:#cdd9ef;
-        --text:  #0f172a;
-        --sub:   #64748b;
-        --blue:  #1d4ed8;
-        --green: #15803d;
-        --red:   #dc2626;
-        --off:   #94a3b8;
+        --bg: #f3f7fc;
+        --surface: #fff;
+        --surface-2: #f7f9fc;
+        --border: #d7e0ed;
+        --text: #142033;
+        --muted: #66758a;
+        --accent: #087f9a;
+        --accent-soft: rgba(8,145,178,.09);
+        --danger: #dc2626;
+        --danger-soft: rgba(220,38,38,.09);
+        --off: #9aa8bb;
       }
     }
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--bg); }
     body {
+      margin: 0;
+      min-width: 280px;
       background: var(--bg);
       color: var(--text);
-      font: 14px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
-      min-width: 300px;
+      font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
     }
-    .wrap {
-      max-width: 360px;
+    button, input { font: inherit; }
+    button, a, input { -webkit-tap-highlight-color: transparent; }
+    button { touch-action: manipulation; color: inherit; }
+    a { color: var(--accent); }
+    a:focus-visible, button:focus-visible, input:focus-visible { outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+
+    .page {
+      width: 100%;
+      max-width: 420px;
       margin: 0 auto;
-      padding: 10px 10px env(safe-area-inset-bottom, 10px);
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: var(--r);
-      overflow: hidden;
+      padding: 10px;
     }
 
-    /* ── Header ─────────────────────────────────────────────────────────── */
-    .header {
+    .card {
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .hero {
       display: flex;
       align-items: center;
       gap: 11px;
-      padding: 13px 14px;
+      padding: 13px 14px 11px;
     }
-    .shield {
-      width: 36px; height: 36px; flex-shrink: 0;
+    .hero-icon {
+      width: 36px;
+      height: 36px;
+      flex: 0 0 36px;
     }
-    .header-title {
-      font-weight: 800;
+    .hero-copy { min-width: 0; }
+    .hero-title {
       font-size: 14px;
-      background: var(--grad);
+      line-height: 1.2;
+      font-weight: 800;
+      background: var(--brand-grad);
       -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
       background-clip: text;
-      letter-spacing: -.2px;
+      -webkit-text-fill-color: transparent;
+      color: var(--accent);
     }
-    .header-sub { font-size: 11px; color: var(--sub); margin-top: 1px; }
+    .hero-sub {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 600;
+    }
 
-    /* ── Toggle rows ─────────────────────────────────────────────────────── */
-    .toggle-row {
-      display: flex; align-items: center;
+    .status-row {
+      display: flex;
+      align-items: center;
       justify-content: space-between;
-      gap: 10px; padding: 13px 14px;
-      cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
-      user-select: none;
-      border-top: 1px solid var(--border);
+      gap: 10px;
+      padding: 9px 14px 12px;
     }
-    .toggle-row:first-child { border-top: none; }
-    .tr-label { font-weight: 600; font-size: 13px; }
-    .tr-hint  { font-size: 11px; color: var(--sub); margin-top: 1px; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      flex: 0 0 8px;
+      border-radius: 50%;
+      background: var(--off);
+    }
+    .status.active { color: var(--accent); }
+    .status.active .status-dot { background: var(--accent); }
+
+    .switch-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 62px;
+      padding: 10px 14px;
+      border-top: 1px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+    }
+    .switch-copy { min-width: 0; }
+    .switch-title { display: block; font-size: 13px; font-weight: 700; }
+    .switch-hint { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
 
     .switch {
-      -webkit-appearance: none; appearance: none;
-      flex-shrink: 0;
-      width: 46px; height: 26px;
+      -webkit-appearance: none;
+      appearance: none;
+      position: relative;
+      width: 48px;
+      height: 28px;
+      flex: 0 0 48px;
+      margin: 0;
+      border: 0;
       border-radius: 999px;
       background: var(--off);
-      border: none; outline: none; cursor: pointer;
-      position: relative;
-      transition: background .18s;
+      cursor: pointer;
     }
     .switch::after {
       content: "";
-      position: absolute; top: 3px; left: 3px;
-      width: 20px; height: 20px; border-radius: 50%;
-      background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35);
-      transition: transform .18s cubic-bezier(.4,0,.2,1);
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,.32);
+      transition: transform .15s ease;
     }
-    .switch:checked { background: var(--brand-b); }
+    .switch:checked { background: var(--accent); }
     .switch:checked::after { transform: translateX(20px); }
 
-    .card-dim { opacity: .4; pointer-events: none; }
-
-    /* ── Quality presets ─────────────────────────────────────────────────── */
-    .section-head {
-      font-size: 10px; font-weight: 700; color: var(--sub);
-      text-transform: uppercase; letter-spacing: .07em;
-      padding: 12px 14px 0;
+    .card-dim { opacity: .48; pointer-events: none; }
+    .section-label {
+      padding: 11px 14px 6px;
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: .08em;
     }
     .presets {
-      display: grid; grid-template-columns: repeat(3, 1fr);
-      gap: 6px; padding: 8px 14px 12px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 7px;
+      padding: 0 12px 12px;
     }
     .preset {
-      -webkit-appearance: none; appearance: none;
-      border: 1.5px solid var(--border);
-      background: transparent; color: var(--text);
-      border-radius: 10px; padding: 8px 4px;
-      cursor: pointer; text-align: center;
-      transition: border-color .15s, background .15s;
-      -webkit-tap-highlight-color: transparent;
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      min-height: 48px;
+      padding: 7px 5px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+      text-align: center;
     }
-    .preset .p-label { font-weight: 700; font-size: 13px; display: block; }
-    .preset .p-hint  { font-size: 10px; color: var(--sub); display: block; margin-top: 2px; }
-    .preset.active {
-      border-color: var(--brand-b);
-      background: rgba(8,145,178,.12);
-      color: var(--brand-b);
-    }
-    .preset.active .p-hint { color: inherit; opacity: .8; }
+    .preset.active { border-color: var(--accent); background: var(--accent-soft); }
+    .p-label { display: block; font-size: 12px; font-weight: 800; }
+    .p-hint { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; line-height: 1.1; }
+    .preset.active .p-label { color: var(--accent); }
 
-    /* ── Reload nudge ────────────────────────────────────────────────────── */
     .nudge {
       display: none;
-      align-items: center; gap: 8px;
-      padding: 9px 14px;
-      background: rgba(245,158,11,.10);
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
       border-top: 1px solid rgba(245,158,11,.25);
-      font-size: 12px; color: #b45309;
+      background: rgba(245,158,11,.10);
+      color: #b45309;
+      font-size: 11px;
+      font-weight: 600;
     }
-    @media (prefers-color-scheme: light) { .nudge { color: #92400e; } }
     .nudge.show { display: flex; }
+    .nudge-text { min-width: 0; }
     .nudge-btn {
-      -webkit-appearance: none; appearance: none;
-      margin-left: auto; flex-shrink: 0;
-      padding: 4px 10px; border-radius: 7px;
-      font-size: 11px; font-weight: 700; cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+      flex: 0 0 auto;
+      min-height: 34px;
+      padding: 0 10px;
       border: 1px solid rgba(245,158,11,.4);
+      border-radius: 8px;
       background: rgba(245,158,11,.15);
       color: inherit;
+      cursor: pointer;
+      font-size: 10px;
+      font-weight: 800;
     }
 
-    /* ── Site card ───────────────────────────────────────────────────────── */
-    .site-row {
-      display: flex; align-items: center;
-      gap: 8px; padding: 11px 14px;
-      font-size: 12px;
+    .site {
+      margin-top: 8px;
     }
+    .site-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 54px;
+      padding: 10px 13px;
+    }
+    .site-icon {
+      width: 20px;
+      height: 20px;
+      flex: 0 0 20px;
+      color: var(--muted);
+    }
+    .site-copy { min-width: 0; flex: 1; }
+    .site-caption { color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
     .site-host {
-      flex: 1; font-weight: 600;
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      margin-top: 1px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      font-weight: 800;
     }
     .site-pill {
-      font-size: 10px; font-weight: 700;
-      padding: 2px 7px; border-radius: 999px; flex-shrink: 0;
+      flex: 0 0 auto;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: var(--danger-soft);
+      color: var(--danger);
+      font-size: 9px;
+      font-weight: 800;
     }
-    .site-pill.excluded { background: rgba(239,68,68,.14); color: var(--red); }
-
-    /* ── Buttons ─────────────────────────────────────────────────────────── */
-    .btn-row { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      padding: 0 10px 10px;
+    }
     .btn {
-      -webkit-appearance: none; appearance: none;
-      flex: 1; min-height: 42px;
-      display: flex; align-items: center; justify-content: center; gap: 5px;
-      border-radius: calc(var(--r) - 2px);
-      font-size: 12px; font-weight: 600; cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 44px;
+      padding: 0 13px;
       border: 1px solid var(--border);
-      background: transparent; color: var(--text);
-      transition: opacity .12s, transform .1s;
-      -webkit-tap-highlight-color: transparent;
+      border-radius: 10px;
+      background: var(--surface-2);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 800;
     }
-    .btn:active  { transform: scale(.96); opacity: .75; }
-    .btn.primary {
-      background: var(--grad);
-      border: none;
-      color: #fff;
+    .btn.primary { border-color: transparent; background: var(--brand-grad); color: #fff; }
+    .btn:active { opacity: .78; }
+    .btn:disabled { opacity: .4; cursor: default; }
+
+    .footer-action { margin-top: 8px; }
+
+    @media (max-width: 359px) {
+      .presets { grid-template-columns: 1fr; }
+      .preset { min-height: 42px; text-align: left; padding: 7px 11px; }
+      .p-label, .p-hint { display: inline; }
+      .p-hint { margin-left: 5px; }
     }
-    .btn:disabled { opacity: .35; cursor: default; transform: none; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: .001ms !important; }
+    }
   </style>
 </head>
 <body>
-<div class="wrap">
+  <main class="page">
+    <section class="card">
+      <header class="hero">
+        <svg class="hero-icon" viewBox="0 0 36 36" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="logoGradient" x1="2" y1="2" x2="34" y2="34" gradientUnits="userSpaceOnUse">
+              <stop offset="0" stop-color="#1a3e99"/>
+              <stop offset=".52" stop-color="#0891b2"/>
+              <stop offset="1" stop-color="#22c55e"/>
+            </linearGradient>
+          </defs>
+          <path d="M18 2 33 8v10.3C33 26.3 26.5 32 18 34 9.5 32 3 26.3 3 18.3V8l15-6Z" fill="url(#logoGradient)"/>
+          <path d="m7 27 6-10 4 5 5-10 7 15" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity=".92"/>
+          <path d="m10 24 8-4.2 8 2.8" stroke="#fff" stroke-width="1.5" stroke-linecap="round" opacity=".84"/>
+          <circle cx="10" cy="24" r="1.8" fill="#fff"/>
+          <circle cx="18" cy="20" r="1.8" fill="#fff"/>
+          <circle cx="26" cy="22.5" r="1.8" fill="#fff"/>
+        </svg>
+        <div class="hero-copy">
+          <div class="hero-title">Bandwidth Saver</div>
+          <div class="hero-sub" id="headerSub">Checking status…</div>
+        </div>
+      </header>
 
-  <!-- Header card: shield + title + enable toggle -->
-  <div class="card">
-    <div class="header">
-      <!-- Shield SVG — mirrors the logo geometry -->
-      <svg class="shield" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="g" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
-            <stop offset="0%"   stop-color="#1a3e99"/>
-            <stop offset="50%"  stop-color="#0891b2"/>
-            <stop offset="100%" stop-color="#22c55e"/>
-          </linearGradient>
-        </defs>
-        <path d="M18 2 L33 8 L33 18 C33 26 26 32 18 34 C10 32 3 26 3 18 L3 8 Z"
-              fill="url(#g)" rx="2"/>
-        <!-- mountain -->
-        <polyline points="7,26 13,16 17,21 23,12 29,26"
-                  fill="none" stroke="white" stroke-width="1.8"
-                  stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>
-        <!-- network dots + line -->
-        <line x1="10" y1="24" x2="19" y2="19" stroke="white" stroke-width="1.5" opacity="0.85"/>
-        <line x1="19" y1="19" x2="27" y2="22" stroke="white" stroke-width="1.5" opacity="0.85"/>
-        <circle cx="10" cy="24" r="2" fill="white" opacity="0.9"/>
-        <circle cx="19" cy="19" r="2" fill="white" opacity="0.9"/>
-        <circle cx="27" cy="22" r="2" fill="white" opacity="0.9"/>
-      </svg>
-      <div>
-        <div class="header-title">Bandwidth Saver</div>
-        <div class="header-sub" id="headerSub">Loading…</div>
+      <div class="status-row">
+        <div class="status" id="statusState">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="statusText">Disabled</span>
+        </div>
       </div>
-    </div>
 
-    <!-- Enable toggle — always interactive, never dimmed -->
-    <label class="toggle-row" for="enabled">
-      <div>
-        <div class="tr-label">Enable compression</div>
-        <div class="tr-hint">Route images through proxy</div>
+      <label class="switch-row" for="enabled">
+        <span class="switch-copy">
+          <span class="switch-title">Enable compression</span>
+          <span class="switch-hint">Route images through the proxy</span>
+        </span>
+        <input type="checkbox" id="enabled" class="switch">
+      </label>
+
+      <div class="nudge" id="nudge">
+        <span class="nudge-text">Reload the page to apply changes.</span>
+        <button class="nudge-btn" id="reloadBtn" type="button">Reload</button>
       </div>
-      <input type="checkbox" id="enabled" class="switch">
-    </label>
+    </section>
 
-    <!-- Reload nudge after changing grayscale or quality -->
-    <div class="nudge" id="nudge">
-      Reload the page to apply changes
-      <button class="nudge-btn" id="reloadBtn" type="button">Reload</button>
-    </div>
-  </div>
+    <section class="card controls" id="ctrlCard">
+      <label class="switch-row" for="grayscale">
+        <span class="switch-copy">
+          <span class="switch-title">Grayscale</span>
+          <span class="switch-hint">B&amp;W images can use less data</span>
+        </span>
+        <input type="checkbox" id="grayscale" class="switch">
+      </label>
 
-  <!-- Compression settings — dims when extension is off -->
-  <div class="card" id="ctrlCard">
-    <label class="toggle-row" style="border-top:none" for="grayscale">
-      <div>
-        <div class="tr-label">Grayscale</div>
-        <div class="tr-hint">B&amp;W images use less data</div>
+      <div class="section-label">Quality</div>
+      <div class="presets" id="qualityPresets">
+        <button class="preset" data-q="20" type="button">
+          <span class="p-label">Small</span>
+          <span class="p-hint">Most saving</span>
+        </button>
+        <button class="preset" data-q="40" type="button">
+          <span class="p-label">Normal</span>
+          <span class="p-hint">Balanced</span>
+        </button>
+        <button class="preset" data-q="80" type="button">
+          <span class="p-label">Sharp</span>
+          <span class="p-hint">More detail</span>
+        </button>
       </div>
-      <input type="checkbox" id="grayscale" class="switch">
-    </label>
-    <div class="section-head">Quality</div>
-    <div class="presets" id="qualityPresets">
-      <button class="preset" data-q="20" type="button">
-        <span class="p-label">Small</span>
-        <span class="p-hint">Saves most</span>
-      </button>
-      <button class="preset" data-q="40" type="button">
-        <span class="p-label">Normal</span>
-        <span class="p-hint">Recommended</span>
-      </button>
-      <button class="preset" data-q="80" type="button">
-        <span class="p-label">Sharp</span>
-        <span class="p-hint">Best quality</span>
-      </button>
-    </div>
-  </div>
+    </section>
 
-  <!-- Current site -->
-  <div class="card">
-    <div class="site-row">
-      <span>🌐</span>
-      <span class="site-host" id="siteName">—</span>
-      <span class="site-pill" id="sitePill" style="display:none"></span>
-    </div>
-    <div class="btn-row">
-      <button id="excludeBtn" class="btn" type="button">Exclude this site</button>
-    </div>
-  </div>
+    <section class="card site">
+      <div class="site-row">
+        <svg class="site-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/>
+          <path d="M3.5 12h17M12 3c2.4 2.5 3.4 5.5 3.4 9S14.4 18.5 12 21c-2.4-2.5-3.4-5.5-3.4-9S9.6 5.5 12 3Z" stroke="currentColor" stroke-width="1.4"/>
+        </svg>
+        <div class="site-copy">
+          <div class="site-caption">Current site</div>
+          <div class="site-host" id="siteName">—</div>
+        </div>
+        <span class="site-pill" id="sitePill" style="display:none"></span>
+      </div>
+      <div class="btn-row">
+        <button id="excludeBtn" class="btn" type="button">Exclude this site</button>
+      </div>
+    </section>
 
-  <!-- Settings button -->
-  <div style="display:flex;gap:8px">
-    <button id="settingsBtn" class="btn primary" type="button" style="flex:1;min-height:42px">
-      ⚙ Settings
-    </button>
-  </div>
+    <div class="footer-action">
+      <button id="settingsBtn" class="btn primary" type="button">Open settings</button>
+    </div>
+  </main>
 
-</div>
-<script type="module" src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

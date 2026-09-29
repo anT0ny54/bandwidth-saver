@@ -1,6 +1,6 @@
 # 🛡️ Bandwidth Saver
 
-> Reduce image bandwidth usage by rewriting image requests through an image optimization proxy/wsrv.nl before the browser downloads them.
+> Reduce image bandwidth usage by rewriting image requests through an image optimization wsrv.nl on-the-fly image cache, resizing, and compression CDN powered by Nginx, libvips, and Cloudflare before the browser downloads them.
 
 **Bandwidth Saver** is a lightweight Manifest V3 Chromium extension focused on reducing image data usage while preserving normal browser image behavior.
 

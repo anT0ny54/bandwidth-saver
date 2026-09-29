@@ -1,1 +1,76 @@
+name: Build and Release
 
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read manifest version
+        id: version
+        shell: bash
+        run: echo "version=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')" >> "$GITHUB_OUTPUT"
+
+      - name: Build extension
+        run: bash ./build.sh --out ./dist
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandwidth-saver-${{ steps.version.outputs.version }}
+          path: dist/bandwidth-saver-${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read manifest version
+        id: version
+        shell: bash
+        run: echo "version=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')" >> "$GITHUB_OUTPUT"
+
+      # Reuse the zip the build job already produced (the build is
+      # reproducible) instead of building a second time.
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bandwidth-saver-${{ steps.version.outputs.version }}
+          path: dist
+
+      - name: Publish manifest version release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')"
+          ZIP="dist/bandwidth-saver-${VERSION}.zip"
+
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} exists; replacing release asset."
+            gh release upload "v${VERSION}" "$ZIP" --clobber
+          else
+            echo "Creating v${VERSION} release."
+            gh release create "v${VERSION}" "$ZIP" \
+              --target "$GITHUB_SHA" \
+              --title "Bandwidth Guardian v${VERSION}" \
+              --generate-notes
+          fi

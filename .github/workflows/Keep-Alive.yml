@@ -1,0 +1,56 @@
+name: Keep Fork Alive
+
+on:
+  schedule:
+    - cron: "17 3 1,15 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: keep-fork-alive
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  keep-alive:
+    name: Create keep-alive commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Update keep-alive file
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p .github
+
+          timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          printf 'Last kept alive on: %s\n' "$timestamp" \
+            > .github/keep-alive.txt
+
+      - name: Commit and push if changed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -- .github/keep-alive.txt
+
+          if git diff --cached --quiet -- .github/keep-alive.txt; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit \
+            -m "chore: update repository keep-alive [skip ci]"
+
+          git push origin "HEAD:${GITHUB_REF_NAME}"

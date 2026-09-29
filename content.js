@@ -384,16 +384,6 @@
     } catch {}
   }
 
-  // ── MAIN-world prehook settings bridge ───────────────────────────────────
-  // prehook.js runs in the page MAIN world and therefore cannot access
-  // chrome.storage directly. Send the resolved settings across the page
-  // message bridge as soon as they are available and whenever they change.
-  function sendPrehookSettings(settings) {
-    try {
-      window.postMessage({ __bwSaver: true, type: "settings", settings: { ...settings } }, "*");
-    } catch {}
-  }
-
   // ── Load settings then process page ───────────────────────────────────────
   // Try storage.local first (bhOpts mirror, ~5 ms). If bhOpts isn't there yet
   // (fresh install, service worker hasn't run, browser restart) fall back to
@@ -404,7 +394,6 @@
       excludedDomains = domainSet(opts.excludeDomains);
       pageExcluded = excludedHost(pageHost);
       proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
-      sendPrehookSettings(opts);
       if (opts.enabled && opts.proxyBase) {
         injectPreconnect(opts.proxyBase);
         rewriteAll();
@@ -417,7 +406,6 @@
         excludedDomains = domainSet(opts.excludeDomains);
         pageExcluded = excludedHost(pageHost);
         proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
-        sendPrehookSettings(opts);
         // Write mirror so next page load takes the fast path
         chrome.storage.local.set({ bhOpts: opts });
         if (opts.enabled && opts.proxyBase) {
@@ -440,7 +428,6 @@
       excludedDomains = domainSet(opts.excludeDomains);
       pageExcluded = excludedHost(pageHost);
       proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
-      sendPrehookSettings(opts);
     } else if (area === "sync") {
       // Rebuild opts from the sync change and also refresh the local mirror
       chrome.storage.sync.get(DEFAULTS, synced => {
@@ -450,7 +437,6 @@
         excludedDomains = domainSet(opts.excludeDomains);
         pageExcluded = excludedHost(pageHost);
         proxyHost = safeURL(opts.proxyBase)?.hostname?.toLowerCase() || "wsrv.nl";
-        sendPrehookSettings(opts);
         chrome.storage.local.set({ bhOpts: opts });
       });
     }

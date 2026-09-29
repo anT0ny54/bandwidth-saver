@@ -11,7 +11,7 @@ export const DEFAULTS = {
   proxyBase:      "https://wsrv.nl/",
   quality:        40,    // matches original compressionLevel default
   grayscale:      true,  // matches original convertBw: true — grayscale ON by default
-  maxWidth:       1920,  // 0 = no limit; MV3-specific addition
+  maxWidth:       1280,  // 0 = no limit; MV3-specific addition
   excludeDomains: "google.com gstatic.com",
   isWebpSupported: false, // detected at install/startup; used to decide jpeg= param
 };

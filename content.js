@@ -43,7 +43,7 @@
   // Minimal fallback used only when the local settings mirror is unavailable.
   const DEFAULTS = {
     enabled: true, proxyBase: WSRV_PROXY, quality: 40, grayscale: true,
-    maxWidth: 1920, excludeDomains: "google.com gstatic.com", isWebpSupported: false
+    maxWidth: 1280, excludeDomains: "google.com gstatic.com", isWebpSupported: false
   };
   // ──────────────────────────────────────────────────────────────────────────
 

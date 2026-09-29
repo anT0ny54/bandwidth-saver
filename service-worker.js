@@ -36,7 +36,7 @@ const DEFAULTS = {
   proxyBase:       "https://wsrv.nl/",
   quality:         40,
   grayscale:       true,
-  maxWidth:        1920,
+  maxWidth:        1280,
   excludeDomains:  "google.com gstatic.com",
   isWebpSupported: false,
 };

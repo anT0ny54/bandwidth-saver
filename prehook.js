@@ -22,6 +22,7 @@
   let pageExcluded = false;   // cached excludedHost(pageHost), rebuilt on settings change
   const pending = new Set(); // <img>/<source> elements waiting for opts to be ready
   let srcsetCache = new WeakMap();
+  let destroyed = false; // true once the page is navigating away; stop all DOM work
 
   const safeURL = (u, base = document.baseURI) => {
     try { return new URL(u, base); } catch { return null; }
@@ -119,8 +120,21 @@
     return false;
   }
 
+  // Navigation hard-stop: once the user leaves the page, do not keep queuing
+  // microtasks or rewriting DOM in the outgoing document. This prevents heavy
+  // MutationObserver work from starving Chrome's navigation commit.
+  function stop() {
+    if (destroyed) return;
+    destroyed = true;
+    try { preloadObserver && preloadObserver.disconnect(); } catch {}
+    try { pending.clear(); } catch {}
+    try { proxyUrlCache.clear(); } catch {}
+    srcsetCache = new WeakMap();
+  }
+
   // Flush image/source/link elements queued while settings were loading.
   function flushPending() {
+    if (destroyed) return;
     for (const el of pending) {
       pending.delete(el);
       try {
@@ -162,11 +176,13 @@
   // restart before onStartup fired — fall back to storage.sync so we never
   // silently use empty defaults and let original images through.
   chrome.storage.local.get({ bhOpts: null }, d => {
+    if (destroyed) return;
     if (d.bhOpts) {
       applyOpts(d.bhOpts);
       flushPending();
     } else {
       chrome.storage.sync.get(defaults, synced => {
+        if (destroyed) return;
         applyOpts(synced);
         flushPending();
         // Write the mirror so subsequent pages load fast
@@ -180,11 +196,13 @@
   // Fallback: sync area — catches changes when the service worker is inactive
   // or not supported (Kiwi/Cromite).
   chrome.storage.onChanged.addListener((changes, area) => {
+    if (destroyed) return;
     if (area === "local" && changes.bhOpts) {
       applyOpts(changes.bhOpts.newValue || defaults);
       if (ready) flushPending();
     } else if (area === "sync") {
       chrome.storage.sync.get(defaults, synced => {
+        if (destroyed) return;
         const changed = !sameOpts(synced, opts);
         applyOpts(synced);
         if (ready) flushPending();
@@ -308,6 +326,7 @@
   // whose href is already a proxy URL is a no-op.
   function processPreloadLink(el) {
     try {
+      if (destroyed) return;
       if (!isImagePreloadLink(el)) return;
       const stashed = el.dataset.bhPreloadHref;
       const current = el.getAttribute("href");
@@ -320,10 +339,12 @@
         // browser cannot start downloading the full-resolution image.
         if (!stashed) el.dataset.bhPreloadHref = original;
         pending.add(el);
-        setAttr.call(el, "href", "about:blank");
+        // Never write the same value from inside an observed attribute callback;
+        // same-value setAttribute can still enqueue a mutation in some engines.
+        if (current !== "about:blank") setAttr.call(el, "href", "about:blank");
       } else {
         if (stashed) el.removeAttribute("data-bh-preload-href");
-        setAttr.call(el, "href", decided);
+        if (current !== decided) setAttr.call(el, "href", decided);
       }
     } catch {}
   }
@@ -453,11 +474,14 @@
     });
   }
 
-  // ── Patch Element.prototype.setAttribute for attribute-based src assignment ─
+  // ── Patch Element.prototype.setAttribute for attribute-based assignment ────
   Element.prototype.setAttribute = function(name, value) {
     try {
+      if (destroyed) return setAttr.call(this, name, value);
       const n = String(name).toLowerCase();
-      if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
+
+      // Handle these before the generic src/srcset gate; otherwise the early
+      // return below makes the loading and preload branches unreachable.
       if (this instanceof HTMLImageElement && n === "loading") {
         const v = String(value || "").toLowerCase();
         if (!ready || !opts) {
@@ -468,6 +492,7 @@
         if (!opts.enabled || !opts.proxyBase || pageExcluded) return setAttr.call(this, "loading", v);
         return setAttr.call(this, "loading", v === "eager" ? "eager" : "lazy");
       }
+
       if (this instanceof HTMLLinkElement &&
           (n === "href" || n === "rel" || n === "as" || n === "type")) {
         // Let the attribute land first so isImagePreloadLink() sees the full
@@ -476,6 +501,8 @@
         processPreloadLink(this);
         return;
       }
+
+      if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
       if (this instanceof HTMLImageElement && (n === "src" || n === "srcset")) {
         if (n === "src") {
           const decided = decideSrc(String(value));
@@ -513,7 +540,8 @@
   // ── MutationObserver for <link rel="preload" as="image"> ──────────────────
   // The HTML parser sets attributes natively, bypassing our JS patches. Watch
   // for link elements added to the DOM and for rel/as/href/type changes.
-  const preloadObserver = new MutationObserver(mutations => {
+  preloadObserver = new MutationObserver(mutations => {
+    if (destroyed) return;
     for (const m of mutations) {
       if (m.type === "childList") {
         m.addedNodes.forEach(n => {
@@ -535,6 +563,13 @@
     subtree: true,
     attributes: true,
     attributeFilter: ["href", "rel", "as", "type"]
+  });
+
+  // Free the outgoing page immediately on normal navigation. Skip persisted
+  // pageshow/bfcache restores so back/forward keeps working.
+  window.addEventListener("pagehide", e => {
+    if (e.persisted) return;
+    stop();
   });
 
 })();

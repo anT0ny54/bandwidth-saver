@@ -399,12 +399,24 @@
   }
 
   function rewriteAll() {
+    if (destroyed) return;
     document.querySelectorAll(CANDIDATE_SELECTOR).forEach(processCandidate);
   }
 
+  function scheduleInitialRewrite() {
+    if (destroyed) return;
+    // Yield once before a full-page scan so navigation/rendering is not blocked
+    // behind querySelectorAll plus attribute writes on huge documents.
+    setTimeout(() => {
+      if (destroyed) return;
+      injectPreconnect(opts.proxyBase);
+      rewriteAll();
+    }, 0);
+  }
+
   // ── MutationObserver ───────────────────────────────────────────────────────
-  // Batch synchronous DOM churn into one microtask. This prevents repeated
-  // scans when frameworks append a subtree and immediately modify its attrs.
+  // Batch synchronous DOM churn into one macrotask. This prevents repeated
+  // scans while still yielding to Chrome's navigation/rendering work.
   let pendingMutations = [];
   let mutationFlushQueued = false;
 
@@ -425,8 +437,14 @@
         if (!t) continue;
         if ((m.attributeName === "src" || m.attributeName === "srcset") &&
             (t.tagName === "IMG" || t.tagName === "SOURCE")) {
-          doneImg.delete(t);
-          imageTargets.add(t);
+          // Ignore mutations produced by our own proxy writes. Reprocessing a
+          // wsrv/excluded value only creates more observer work.
+          const cur = t.getAttribute(m.attributeName);
+          const abs = cur ? resolveHttp(cur) : null;
+          if (abs && !shouldSkip(abs)) {
+            doneImg.delete(t);
+            imageTargets.add(t);
+          }
         } else if (m.attributeName === "style") {
           doneBg.delete(t);
           bgTargets.add(t);
@@ -450,21 +468,40 @@
     preloadTargets.forEach(rewritePreload);
   }
 
+  const MUTATION_RECORD_LIMIT = 2000;
+  let destroyed = false; // set on real navigation away from this document
+
   function queueMutationFlush(mutations) {
-    pendingMutations.push(...mutations);
+    if (destroyed) return;
+    // Bound memory during pathological DOM churn. A bounded loss here is safer
+    // than an unbounded array that can pin the main thread until navigation.
+    for (const m of mutations) {
+      pendingMutations.push(m);
+      if (pendingMutations.length >= MUTATION_RECORD_LIMIT) break;
+    }
     if (mutationFlushQueued) return;
     mutationFlushQueued = true;
     const flush = () => {
       mutationFlushQueued = false;
+      if (destroyed) return;
       const batch = pendingMutations;
       pendingMutations = [];
       processMutations(batch);
     };
-    if (typeof queueMicrotask === "function") queueMicrotask(flush);
-    else Promise.resolve().then(flush);
+    // Use a macrotask, not a microtask. Microtask chains can starve Chrome's
+    // navigation commit when a page keeps mutating during click-to-navigation.
+    setTimeout(flush, 0);
   }
 
-  const mo = new MutationObserver(queueMutationFlush);
+  function stop() {
+    if (destroyed) return;
+    destroyed = true;
+    try { mo && mo.disconnect(); } catch {}
+    pendingMutations = [];
+  }
+
+  let mo = null;
+  mo = new MutationObserver(queueMutationFlush);
 
   mo.observe(document, {
     childList:       true,
@@ -502,21 +539,17 @@
   // (fresh install, service worker hasn't run, browser restart) fall back to
   // storage.sync and write the mirror so subsequent pages are fast.
   chrome.storage.local.get({ bhOpts: null }, d => {
+    if (destroyed) return;
     if (d.bhOpts) {
       applyOpts(d.bhOpts);
-      if (opts.enabled && opts.proxyBase) {
-        injectPreconnect(opts.proxyBase);
-        rewriteAll();
-      }
+      if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
     } else {
       chrome.storage.sync.get(DEFAULTS, synced => {
+        if (destroyed) return;
         applyOpts(synced);
         // Write mirror so next page load takes the fast path
         chrome.storage.local.set({ bhOpts: opts });
-        if (opts.enabled && opts.proxyBase) {
-          injectPreconnect(opts.proxyBase);
-          rewriteAll();
-        }
+        if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
       });
     }
   });
@@ -526,15 +559,25 @@
   // Fallback: sync area — catches changes when the service worker is inactive,
   // restarting, or not supported (Kiwi/Cromite). Both paths update opts.
   chrome.storage.onChanged.addListener((changes, area) => {
+    if (destroyed) return;
     if (area === "local" && changes.bhOpts) {
       applyOpts(changes.bhOpts.newValue || DEFAULTS);
     } else if (area === "sync") {
       chrome.storage.sync.get(DEFAULTS, synced => {
+        if (destroyed) return;
         const changed = !sameOpts(synced, opts);
         applyOpts(synced);
         // The service worker normally refreshes the mirror; only write when it differs.
         if (changed) chrome.storage.local.set({ bhOpts: opts });
       });
     }
+  });
+
+  // On a real navigation, disconnect immediately so the outgoing page cannot
+  // keep scheduling image-rewrite work while Chrome is trying to commit the
+  // next URL. Persisted bfcache pages are left connected.
+  window.addEventListener("pagehide", e => {
+    if (e.persisted) return;
+    stop();
   });
 })();

@@ -44,7 +44,7 @@
   // KEEP IN SYNC with defaults.js, prehook.js and service-worker.js.
   const DEFAULTS = {
     enabled: true, proxyBase: WSRV_PROXY, quality: 60, grayscale: true,
-    maxWidth: 768, excludeDomains: "google.com gstatic.com"
+    maxWidth: 768, excludeDomains: ""
   };
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -77,6 +77,7 @@
 
   let opts = null;
   let proxyConfig = null;
+  let destroyed = false;      // set on real navigation away from this document
   const proxyUrlCache = new Map();
   const PROXY_CACHE_LIMIT = 512;
   const doneImg = new WeakSet();
@@ -163,11 +164,10 @@
   // Mirrors original buildCompressUrl() plus himshim proxy2 additions.
   function updateProxyConfig(next) {
     opts = next;
-    const base = String(opts.proxyBase || "").trim();
-    if (!base) { proxyConfig = null; return; }
+    const base = WSRV_PROXY;
     const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 60) || 60));
     const maxWidth = Number(opts.maxWidth) || 0;
-    proxyConfig = { base, sep: base.includes("?") ? "&" : "?", quality,
+    proxyConfig = { base, sep: "?", quality,
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
   }
 
@@ -409,7 +409,6 @@
     // behind querySelectorAll plus attribute writes on huge documents.
     setTimeout(() => {
       if (destroyed) return;
-      injectPreconnect(opts.proxyBase);
       rewriteAll();
     }, 0);
   }
@@ -469,7 +468,6 @@
   }
 
   const MUTATION_RECORD_LIMIT = 2000;
-  let destroyed = false; // set on real navigation away from this document
 
   function queueMutationFlush(mutations) {
     if (destroyed) return;
@@ -509,30 +507,6 @@
     attributes:      true,
     attributeFilter: ["src", "srcset", "style", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as"]
   });
-
-  // ── Preconnect to proxy ───────────────────────────────────────────────────
-  // Injecting <link rel="preconnect"> opens the TCP+TLS connection to the proxy
-  // in parallel with HTML parsing, so the first image request doesn't pay the
-  // full handshake cost (~100-300 ms on mobile).
-  // dns-prefetch is a lighter fallback for browsers that ignore preconnect.
-  // No crossorigin attribute: <img> requests are credentialed no-cors fetches, and a
-  // crossorigin=anonymous preconnect would open a socket pool the images never reuse.
-  function injectPreconnect(proxyBase) {
-    try {
-      const origin = new URL(proxyBase).origin;
-      if (document.querySelector(`link[href="${origin}"]`)) return; // already injected
-      const root = document.head || document.documentElement;
-      if (!root) return;
-      const pc = document.createElement("link");
-      pc.rel  = "preconnect";
-      pc.href = origin;
-      root.prepend(pc);
-      const dns = document.createElement("link");
-      dns.rel  = "dns-prefetch";
-      dns.href = origin;
-      root.prepend(dns);
-    } catch {}
-  }
 
   // ── Load settings then process page ───────────────────────────────────────
   // Try storage.local first (bhOpts mirror, ~5 ms). If bhOpts isn't there yet

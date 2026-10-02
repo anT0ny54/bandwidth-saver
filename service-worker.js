@@ -25,11 +25,11 @@ const WSRV_PROXY = "https://wsrv.nl/";
 // KEEP IN SYNC with defaults.js, prehook.js and content.js.
 const DEFAULTS = {
   enabled:         true,
-  proxyBase:       "https://wsrv.nl/",
+  proxyBase:       WSRV_PROXY,
   quality:         60,
   grayscale:       true,
   maxWidth:        768,
-  excludeDomains:  "google.com gstatic.com",
+  excludeDomains:  "",
 };
 
 // Rule 1 is no longer added, but we still remove it on every refresh so any
@@ -77,12 +77,6 @@ chrome.runtime.onInstalled.addListener(function() {
       mirrorToLocal(); // seed the local mirror for content scripts
     });
   });
-});
-
-chrome.runtime.onStartup.addListener(function() {
-  mirrorToLocal();
-  refreshRules();
-  updateIcon();
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {

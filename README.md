@@ -34,7 +34,6 @@ It is conservative by design: it rewrites URLs and lets the browser keep doing `
 - **Duplicate-work protection** — per-element `WeakSet`/`WeakMap` caches avoid reprocessing the same value.
 - **Early URL classification** — skips unsupported, excluded, already-proxied, SVG, icon, and known tiny/tracking URLs before building a proxy URL.
 - **Per-site exclusion** — from the popup or the settings page; subdomains of an excluded domain are excluded too.
-- **Preconnect** — injects `preconnect`/`dns-prefetch` hints for `wsrv.nl`.
 - **Settings mirror** — settings live in `storage.sync`; the service worker mirrors them to `storage.local` (`bhOpts`) because content scripts read local storage faster.
 - **Statistics batching** — counters are flushed to storage at most every ~750 ms.
 

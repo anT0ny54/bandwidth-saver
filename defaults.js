@@ -12,5 +12,5 @@ export const DEFAULTS = {
   quality:        60,    // Normal preset
   grayscale:      true,  // matches original convertBw: true — grayscale ON by default
   maxWidth:       768,  // HD preset; 0 = no limit
-  excludeDomains: "google.com gstatic.com",
+  excludeDomains: "",
 };

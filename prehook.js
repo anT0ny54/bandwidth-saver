@@ -9,7 +9,7 @@
   // KEEP IN SYNC with defaults.js, content.js and service-worker.js.
   const defaults = {
     enabled: true, proxyBase: WSRV_PROXY, quality: 60, grayscale: true,
-    maxWidth: 768, excludeDomains: "google.com gstatic.com"
+    maxWidth: 768, excludeDomains: ""
   };
 
   let opts = null;        // loaded options (null until storage responds)
@@ -23,6 +23,7 @@
   const pending = new Set(); // <img>/<source> elements waiting for opts to be ready
   let srcsetCache = new WeakMap();
   let destroyed = false; // true once the page is navigating away; stop all DOM work
+  let preloadObserver = null; // declared up front; stop() references it
 
   const safeURL = (u, base = document.baseURI) => {
     try { return new URL(u, base); } catch { return null; }
@@ -52,11 +53,10 @@
 
   function updateProxyConfig(next) {
     opts = next;
-    const base = String(opts.proxyBase || "").trim();
-    if (!base) { proxyConfig = null; return; }
+    const base = WSRV_PROXY;
     const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 60) || 60));
     const maxWidth = Number(opts.maxWidth) || 0;
-    proxyConfig = { base, sep: base.includes("?") ? "&" : "?", quality,
+    proxyConfig = { base, sep: "?", quality,
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
   }
 

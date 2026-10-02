@@ -31,12 +31,18 @@ PY
 
 # Fast preflight: validate every shipped JavaScript file before packaging.
 # This catches syntax regressions early and requires only the Node runtime.
+CHECK_TMP="$(mktemp -d)"
 for js in service-worker.js prehook.js content.js popup.js options.js defaults.js; do
-  node --check "$ROOT_DIR/$js" >/dev/null || {
+  # popup/options/defaults use ES module syntax; check them as .mjs so older
+  # Node versions (which treat .js as CommonJS) don't reject import/export.
+  cp "$ROOT_DIR/$js" "$CHECK_TMP/${js%.js}.mjs"
+  node --check "$CHECK_TMP/${js%.js}.mjs" >/dev/null || {
     echo "ERROR: JavaScript syntax check failed: $js" >&2
+    rm -rf "$CHECK_TMP"
     exit 1
   }
 done
+rm -rf "$CHECK_TMP"
 
 # The manifest is the single source of truth for the extension version.
 # Do not hard-code a release version here: every manifest version must build.

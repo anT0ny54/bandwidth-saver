@@ -1,19 +1,27 @@
 // Bandwidth Saver — service worker
 //
-// ══ WHY DNR RULE 1 (image redirect) WAS REMOVED ══════════════════════════════
+// ══ DNR RULE 1 (image redirect) — QUERY-LESS URLs ONLY ═══════════════════════
 //
 //  Chrome's DNR regexSubstitution inserts the captured URL RAW — there is no
-//  way to call encodeURIComponent on it. So for any image URL that contains
-//  query parameters the substitution produces a malformed proxy URL:
+//  way to call encodeURIComponent on it. That makes DNR unsafe for image URLs
+//  WITH query parameters (e.g. photo.jpg?auto=webp&width=1092): the raw
+//  insertion would orphan the original query into the proxy's own query
+//  string. Those URLs are still handled by content.js/prehook.js, which CAN
+//  call encodeURIComponent.
 //
-//    Original URL:  https://tvguide.com/img/photo.jpg?auto=webp&width=1092
-//    DNR cannot safely encode the captured source URL for its replacement.
+//  But for image URLs WITHOUT a query string or fragment (`[^?#]+`), raw
+//  insertion is exactly what the browser would send — no encoding needed.
+//  Rule 1 redirects those at the NETWORK layer, before the browser resolves
+//  the original host, so:
+//    • no DNS lookup for the original image host leaks,
+//    • even stylesheet (non-inline) background images are covered,
+//    • the HTML-parser race window (image starts fetching while content.js
+//      is still waiting on storage) no longer leaks original hosts.
 //
-//  Fix: image src rewriting is now done entirely in content scripts (content.js
-//  and prehook.js) which CAN call encodeURIComponent. This is the only correct
-//  approach in MV3.
+//  Double-proxy protection: "wsrv.nl" is in excludedRequestDomains, and the
+//  excluded user domains are excluded as both request and initiator domains.
 //
-//  DNR Rule 2 (CSP header stripping) is kept — it does not need URL encoding.
+//  DNR Rule 2 (CSP header stripping) is unchanged.
 //
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -32,9 +40,9 @@ const DEFAULTS = {
   excludeDomains:  "",
 };
 
-// Rule 1 is no longer added, but we still remove it on every refresh so any
-// leftover rule from a previous version of the extension is cleaned up.
-const RULE_ID_REDIRECT = 1;  // legacy — removed, never re-added
+// Rule 1 redirects query-less image URLs to the proxy (see top-of-file).
+// Rule 2 strips CSP headers so proxy images can load.
+const RULE_ID_REDIRECT = 1;  // network-layer redirect: query-less image URLs only
 const RULE_ID_CSP      = 2;  // strips CSP headers so proxy images can load
 const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP];
 
@@ -82,7 +90,8 @@ chrome.runtime.onInstalled.addListener(function() {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   mirrorToLocal();
-  if ("enabled" in changes || "excludeDomains" in changes) refreshRules();
+  if ("enabled" in changes || "excludeDomains" in changes ||
+      "quality" in changes || "grayscale" in changes || "maxWidth" in changes) refreshRules();
   if ("enabled" in changes) updateIcon();
 });
 
@@ -167,8 +176,8 @@ function onProxyCompleted({ url, responseHeaders, fromCache, statusCode }) {
 }
 
 // ── DNR rules ─────────────────────────────────────────────────────────────────
-// Only Rule 2 (CSP stripping) is active. Rule 1 (redirect) is intentionally
-// not added — see top-of-file explanation.
+// Rule 1: redirect query-less image URLs to the proxy at the network layer.
+// Rule 2: strip CSP headers so proxy-domain images aren't blocked by the page.
 //
 // Uses callback form throughout — the Promise-returning form of chrome APIs
 // (e.g. await chrome.storage.sync.get()) is not available in classic
@@ -183,16 +192,46 @@ function doRefreshRules(done) {
       return;
     }
 
-    // Excluded sites are never proxied, so they keep their own CSP. DNR rejects the
-    // whole update on an invalid domain, so only well-formed hostnames are passed.
+    // Excluded sites are never proxied. DNR rejects the whole update on an
+    // invalid domain, so only well-formed hostnames are passed.
     var excluded = String(opts.excludeDomains || "").split(/[,\s]+/)
       .map(function(s) { return s.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""); })
       .filter(function(s) { return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(s); });
-    var condition = { resourceTypes: ["main_frame", "sub_frame"] };
-    if (excluded.length) condition.excludedRequestDomains = Array.from(new Set(excluded));
+    var excludedSet = Array.from(new Set(excluded));
+
+    // Rule 1 condition: image requests whose URL has NO query string or
+    // fragment (raw substitution is safe). The proxy itself and excluded
+    // image hosts are excluded as request domains; excluded PAGE origins are
+    // excluded as initiator domains so excluded sites load untouched.
+    var redirectCondition = {
+      resourceTypes: ["image"],
+      regexFilter: "^(https?)://([^?#]+)$",
+      excludedRequestDomains: Array.from(new Set(["wsrv.nl"].concat(excluded)))
+    };
+    if (excludedSet.length) redirectCondition.excludedInitiatorDomains = excludedSet;
+
+    // Proxy parameters baked into the substitution; refreshed on any change.
+    var quality = Math.max(1, Math.min(100, Number(opts.quality ?? 60) || 60));
+    var maxWidth = Number(opts.maxWidth) || 0;
+    var params = "q=" + quality;
+    if (maxWidth > 0) params += "&w=" + maxWidth + "&fit=inside&we=1&dpr=2";
+    if (opts.grayscale) params += "&filt=greyscale";
+    params += "&maxage=30d&page=-1&n=-1&output=webp&default=1";
+
+    var addRules = [{
+      id: RULE_ID_REDIRECT,
+      priority: 1,
+      action: {
+        type: "redirect",
+        redirect: { regexSubstitution: "https://wsrv.nl/?url=\1://\2&" + params }
+      },
+      condition: redirectCondition
+    }];
 
     // Rule 2: Strip CSP headers so proxy-domain images aren't blocked by the page.
-    var addRules = [{
+    var condition = { resourceTypes: ["main_frame", "sub_frame"] };
+    if (excludedSet.length) condition.excludedRequestDomains = excludedSet;
+    addRules.push({
       id: RULE_ID_CSP,
       priority: 1,
       action: {
@@ -203,9 +242,17 @@ function doRefreshRules(done) {
         ]
       },
       condition: condition
-    }];
+    });
 
-    chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds, addRules: addRules }, done);
+    chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds, addRules: addRules }, function() {
+      if (chrome.runtime.lastError && redirectCondition.excludedInitiatorDomains) {
+        // Some engines reject excludedInitiatorDomains — retry without it so
+        // at least the redirect (request-domain exclusions) and CSP rule live.
+        delete redirectCondition.excludedInitiatorDomains;
+        chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds, addRules: addRules }, done);
+        return;
+      }
+      if (done) done();
+    });
   });
 }
-

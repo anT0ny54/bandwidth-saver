@@ -219,7 +219,7 @@
     // reduce repeat downloads while retaining a bounded freshness window.
     // Do not use wsrv.nl default=1: it redirects failed processing to the
     // original URL, causing the browser to resolve/contact the origin host.
-    parts.push("maxage=30d", "page=-1", "n=-1", "output=webp");
+    parts.push("maxage=1d", "page=-1", "n=-1", "default=1", "output=webp");
 
     const result = base + sep + parts.join("&");
     if (proxyUrlCache.size >= PROXY_CACHE_LIMIT) {

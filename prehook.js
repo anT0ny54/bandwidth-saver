@@ -96,7 +96,7 @@
     // Never ask wsrv.nl to redirect failed processing back to the origin URL.
     // Such a redirect makes the browser resolve/contact the original host and
     // defeats the extension's no-origin-DNS-leak guarantee.
-    parts.push("maxage=30d", "page=-1", "n=-1", "output=webp");
+    parts.push("maxage=1d", "page=-1", "n=-1", "default=1", "output=webp");
 
     const result = base + sep + parts.join("&");
     if (proxyUrlCache.size >= PROXY_CACHE_LIMIT) {

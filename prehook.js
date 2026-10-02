@@ -1,26 +1,49 @@
-// Bandwidth Saver — prehook (runs at document_start)
-// Intercepts <img src>, srcset, and new Image() assignments to prevent the
-// original full-resolution images from ever being downloaded.
+// Bandwidth Saver — prehook (MAIN world, document_start)
+//
+// Installs synchronous DOM hooks BEFORE the HTML parser runs so page
+// JavaScript hits its native DOM property hooks for <img src>, srcset,
+// setAttribute(), loading, and image preloads.
+//
+// ══ EXECUTION-WORLD BOUNDARY ══════════════════════════════════════════════════
+//
+//  This file runs in the page's MAIN world (manifest: "world": "MAIN").
+//  MAIN-world code must NOT depend on extension APIs (chrome.*) — they do not
+//  exist here. Settings arrive exclusively from content.js (ISOLATED world)
+//  through the "bh:settings" DOM event, whose detail is a JSON string. No
+//  JavaScript objects are shared across the execution-world boundary;
+//  proxy-failure state is communicated with the data-bh-failed DOM attribute,
+//  which is visible in both worlds.
+//
+//  Flow:
+//
+//    Page JavaScript / HTML parser
+//          │
+//          ▼
+//      prehook.js (this file, MAIN world)
+//      synchronous DOM hooks — parks eligible URLs until settings arrive
+//          │
+//          │  window event "bh:settings" (JSON string)
+//          ▼
+//      content.js (ISOLATED world) — chrome.storage + DOM processing
+//          │
+//          ▼
+//      service-worker.js — settings mirror / CSP / stats / icon
+//
+// ══════════════════════════════════════════════════════════════════════════════
 (() => {
   // Fixed image proxy: wsrv.nl. The browser receives the processed image
   // from wsrv.nl; it does not download the original image URL directly.
   const WSRV_PROXY = "https://wsrv.nl/";
-  // Minimal fallback used only when the local settings mirror is unavailable.
-  // KEEP IN SYNC with defaults.js, content.js and service-worker.js.
-  const defaults = {
-    enabled: true, proxyBase: WSRV_PROXY, quality: 60, grayscale: true,
-    maxWidth: 768, excludeDomains: ""
-  };
 
-  let opts = null;        // loaded options (null until storage responds)
-  let ready = false;      // true once options have loaded
+  let opts = null;        // loaded options (null until the bridge event fires)
+  let ready = false;      // true once options have arrived from content.js
   let excludedDomains = new Set();
   let proxyConfig = null;
   const proxyUrlCache = new Map();
   const PROXY_CACHE_LIMIT = 512;
   const pageHost = location.hostname.toLowerCase();
   let pageExcluded = false;   // cached excludedHost(pageHost), rebuilt on settings change
-  const pending = new Set(); // <img>/<source> elements waiting for opts to be ready
+  const pending = new Set(); // <img>/<source>/<link> elements waiting for opts
   let srcsetCache = new WeakMap();
   let destroyed = false; // true once the page is navigating away; stop all DOM work
   let preloadObserver = null; // declared up front; stop() references it
@@ -50,6 +73,11 @@
   const isWsrvUrl = u => {
     try { return new URL(u).hostname.toLowerCase() === "wsrv.nl"; } catch { return false; }
   };
+  // Proxy-failure fallback is shared across worlds via this DOM attribute
+  // (set by content.js when a proxied image fires "error"). Never rewrite a
+  // flagged element again.
+  const isFailed = el =>
+    !!(el && el.hasAttribute && el.hasAttribute("data-bh-failed"));
 
   function updateProxyConfig(next) {
     opts = next;
@@ -69,9 +97,6 @@
     pageExcluded = excludedHost(pageHost);
     ready = true;
   }
-
-  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains"]
-    .every(k => a[k] === b[k]);
 
   function buildProxyUrl(orig) {
     if (!proxyConfig || !isHttp(orig)) return orig;
@@ -120,6 +145,28 @@
     return false;
   }
 
+  // ── Settings bridge (ISOLATED world → MAIN world) ──────────────────────────
+  // content.js reads chrome.storage and publishes JSON-serialized settings.
+  // The detail payload is a plain string — no JS objects cross worlds.
+  window.addEventListener("bh:settings", e => {
+    if (destroyed) return;
+    let next = null;
+    try { next = JSON.parse(e.detail); } catch { return; }
+    if (!next || typeof next !== "object") return;
+    applyOpts(next);
+    flushPending();
+  });
+
+  // Watchdog: if the bridge event never arrives (content script blocked,
+  // storage failure), release every parked element with its ORIGINAL value
+  // instead of leaving the page blank. Treated as "extension inactive".
+  setTimeout(() => {
+    if (destroyed || ready) return;
+    applyOpts({ enabled: false, proxyBase: WSRV_PROXY, quality: 60,
+      grayscale: true, maxWidth: 0, excludeDomains: "" });
+    flushPending();
+  }, 1500);
+
   // Navigation hard-stop: once the user leaves the page, do not keep queuing
   // microtasks or rewriting DOM in the outgoing document. This prevents heavy
   // MutationObserver work from starving Chrome's navigation commit.
@@ -131,86 +178,6 @@
     try { proxyUrlCache.clear(); } catch {}
     srcsetCache = new WeakMap();
   }
-
-  // Flush image/source/link elements queued while settings were loading.
-  function flushPending() {
-    if (destroyed) return;
-    for (const el of pending) {
-      pending.delete(el);
-      try {
-        // <link rel="preload" as="image"> queued with a stashed original href.
-        if (el instanceof HTMLLinkElement) { processPreloadLink(el); continue; }
-        // <img>.loading values set before settings were known.
-        if (el instanceof HTMLImageElement && loadingDesc && loadingDesc.set) {
-          const pendingLoading = el.dataset.bhPendingLoading;
-          if (pendingLoading !== undefined) {
-            el.removeAttribute("data-bh-pending-loading");
-            if (!opts.enabled || !opts.proxyBase || pageExcluded) {
-              loadingDesc.set.call(el, pendingLoading);
-            } else {
-              loadingDesc.set.call(el, pendingLoading === "eager" ? "eager" : "lazy");
-            }
-          }
-        }
-        const pendingSrc = el.dataset.bhPendingSrc;
-        if (pendingSrc && el instanceof HTMLImageElement) {
-          el.removeAttribute("data-bh-pending-src");
-          nativeSetSrc(el, decideSrc(pendingSrc) ?? pendingSrc);
-        }
-        const pendingSrcset = el.dataset.bhPendingSrcset;
-        if (pendingSrcset) {
-          el.removeAttribute("data-bh-pending-srcset");
-          const rewritten = rewriteSrcset(pendingSrcset, el);
-          if (el instanceof HTMLImageElement) {
-            nativeSetSrcset(el, rewritten);
-          } else if (sourceProto && el instanceof HTMLSourceElement) {
-            nativeSourceSetSrcset(el, rewritten);
-          }
-        }
-      } catch {}
-    }
-  }
-
-  // Try storage.local first (bhOpts mirror written by the service worker, ~5 ms).
-  // If bhOpts is missing — fresh install, service worker not yet run, or browser
-  // restart before onStartup fired — fall back to storage.sync so we never
-  // silently use empty defaults and let original images through.
-  chrome.storage.local.get({ bhOpts: null }, d => {
-    if (destroyed) return;
-    if (d.bhOpts) {
-      applyOpts(d.bhOpts);
-      flushPending();
-    } else {
-      chrome.storage.sync.get(defaults, synced => {
-        if (destroyed) return;
-        applyOpts(synced);
-        flushPending();
-        // Write the mirror so subsequent pages load fast
-        chrome.storage.local.set({ bhOpts: { ...synced, proxyBase: WSRV_PROXY } });
-      });
-    }
-  });
-
-  // Stay current when settings change.
-  // Primary: local area (bhOpts mirror, instant).
-  // Fallback: sync area — catches changes when the service worker is inactive
-  // or not supported (Kiwi/Cromite).
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (destroyed) return;
-    if (area === "local" && changes.bhOpts) {
-      applyOpts(changes.bhOpts.newValue || defaults);
-      if (ready) flushPending();
-    } else if (area === "sync") {
-      chrome.storage.sync.get(defaults, synced => {
-        if (destroyed) return;
-        const changed = !sameOpts(synced, opts);
-        applyOpts(synced);
-        if (ready) flushPending();
-        // The service worker normally refreshes the mirror; only write when it differs.
-        if (changed) chrome.storage.local.set({ bhOpts: { ...synced, proxyBase: WSRV_PROXY } });
-      });
-    }
-  });
 
   // Capture native property descriptors BEFORE we patch them
   const imgProto = HTMLImageElement.prototype;
@@ -229,6 +196,7 @@
 
   // Spec-style srcset parser: a comma inside a URL (e.g. Cloudinary "w_400,h_300")
   // is part of the URL; only trailing commas or a comma after descriptors end a candidate.
+  // KEEP IN SYNC with parseSrcset in content.js.
   function parseSrcset(ss) {
     const out = [];
     const n = ss.length;
@@ -262,7 +230,8 @@
 
   function rewriteSrcset(ss, el) {
     if (!ss) return ss;
-    if (pageExcluded) return ss;
+    // Honors the disabled state too — flushPending() calls this directly.
+    if (!ready || !opts || !opts.enabled || !opts.proxyBase || pageExcluded) return ss;
 
     if (el) {
       const cached = srcsetCache.get(el);
@@ -349,6 +318,60 @@
     } catch {}
   }
 
+  // Flush image/source/link elements queued while settings were loading.
+  function flushPending() {
+    if (destroyed) return;
+    for (const el of pending) {
+      pending.delete(el);
+      try {
+        // <link rel="preload" as="image"> queued with a stashed original href.
+        if (el instanceof HTMLLinkElement) { processPreloadLink(el); continue; }
+        // <img>.loading values set before settings were known.
+        if (el instanceof HTMLImageElement && loadingDesc && loadingDesc.set) {
+          const pendingLoading = el.dataset.bhPendingLoading;
+          if (pendingLoading !== undefined) {
+            el.removeAttribute("data-bh-pending-loading");
+            if (!opts.enabled || !opts.proxyBase || pageExcluded) {
+              loadingDesc.set.call(el, pendingLoading);
+            } else {
+              loadingDesc.set.call(el, pendingLoading === "eager" ? "eager" : "lazy");
+            }
+          }
+        }
+        if (isFailed(el)) {
+          // Proxy already failed for this element: release the ORIGINAL value.
+          const failedSrc = el.dataset.bhPendingSrc;
+          if (failedSrc && el instanceof HTMLImageElement) {
+            el.removeAttribute("data-bh-pending-src");
+            nativeSetSrc(el, failedSrc);
+          }
+          const failedSrcset = el.dataset.bhPendingSrcset;
+          if (failedSrcset) {
+            el.removeAttribute("data-bh-pending-srcset");
+            if (el instanceof HTMLImageElement) nativeSetSrcset(el, failedSrcset);
+            else if (sourceProto && el instanceof HTMLSourceElement) nativeSourceSetSrcset(el, failedSrcset);
+          }
+          continue;
+        }
+        const pendingSrc = el.dataset.bhPendingSrc;
+        if (pendingSrc && el instanceof HTMLImageElement) {
+          el.removeAttribute("data-bh-pending-src");
+          nativeSetSrc(el, decideSrc(pendingSrc) ?? pendingSrc);
+        }
+        const pendingSrcset = el.dataset.bhPendingSrcset;
+        if (pendingSrcset) {
+          el.removeAttribute("data-bh-pending-srcset");
+          const rewritten = rewriteSrcset(pendingSrcset, el);
+          if (el instanceof HTMLImageElement) {
+            nativeSetSrcset(el, rewritten);
+          } else if (sourceProto && el instanceof HTMLSourceElement) {
+            nativeSourceSetSrcset(el, rewritten);
+          }
+        }
+      } catch {}
+    }
+  }
+
   // ── Patch <img>.src ────────────────────────────────────────────────────────
   Object.defineProperty(imgProto, "src", {
     configurable: true,
@@ -356,6 +379,8 @@
     get: srcDesc.get,
     set(value) {
       try {
+        // Proxy-failure fallback (set by content.js): never re-proxy.
+        if (isFailed(this)) { nativeSetSrc(this, value); return; }
         const decided = decideSrc(String(value));
         if (decided === null) {
           this.dataset.bhPendingSrc = String(value);
@@ -378,6 +403,8 @@
       get: srcsetDesc.get,
       set(value) {
         try {
+          // Proxy-failure fallback (set by content.js): never re-proxy.
+          if (isFailed(this)) { nativeSetSrcset(this, value); return; }
           const v = String(value || "");
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
@@ -403,6 +430,8 @@
       get: sourceSrcsetDesc.get,
       set(value) {
         try {
+          // Proxy-failure fallback (set by content.js): never re-proxy.
+          if (isFailed(this)) { nativeSourceSetSrcset(this, value); return; }
           const v = String(value || "");
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
@@ -420,7 +449,7 @@
     });
   }
 
-  // ── Patch <img>.loading ──────────────────────────────────────────────────────
+  // ── Patch <img>.loading ────────────────────────────────────────────────────
   // Force lazy loading while the extension is active so offscreen images are
   // never downloaded. Explicit eager requests from the page are respected so
   // carousels / above-the-fold logic keep working.
@@ -458,6 +487,8 @@
       set(value) {
         try {
           if (isImagePreloadLink(this)) {
+            // Proxy-failure fallback (set by content.js): never re-proxy.
+            if (isFailed(this)) { linkHrefDesc.set.call(this, value); return; }
             const decided = decidePreloadHref(String(value));
             if (decided === null) {
               this.dataset.bhPreloadHref = String(value);
@@ -479,6 +510,11 @@
     try {
       if (destroyed) return setAttr.call(this, name, value);
       const n = String(name).toLowerCase();
+
+      // Proxy-failure fallback: let the page manage a failed element directly.
+      if ((n === "src" || n === "srcset") && isFailed(this)) {
+        return setAttr.call(this, name, value);
+      }
 
       // Handle these before the generic src/srcset gate; otherwise the early
       // return below makes the loading and preload branches unreachable.

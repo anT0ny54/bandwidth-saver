@@ -4,10 +4,13 @@
 //
 //  Image interception is now split across two layers:
 //
-//  Layer 1 — prehook.js (document_start, synchronous)
+//  Layer 1 — prehook.js (document_start, synchronous, MAIN world)
 //    Patches HTMLImageElement.prototype.src, srcset, setAttribute, and Image()
-//    BEFORE the HTML parser runs. Catches all images set via JavaScript.
-//    Zero wasted bytes — proxy URL is set before any network request fires.
+//    BEFORE the HTML parser runs, in the page's MAIN world, so page
+//    JavaScript hits the hooks. Zero wasted bytes — the proxy URL is set
+//    before any network request fires. MAIN-world code must not use chrome.*
+//    APIs; it receives settings from this file via the "bh:settings" DOM
+//    event as a JSON string, and parks eligible URLs until they arrive.
 //
 //  Layer 2 — THIS FILE (document_start, async after storage read)
 //    Catches three categories that prehook cannot:
@@ -80,9 +83,13 @@
   let destroyed = false;      // set on real navigation away from this document
   const proxyUrlCache = new Map();
   const PROXY_CACHE_LIMIT = 512;
-  const doneImg = new WeakSet();
-  const doneLazy = new WeakSet();
-  const doneBg = new WeakSet();
+  // Per-element config-signature maps instead of plain WeakSets: a settings
+  // change bumps `sig`, so already-processed elements become eligible again
+  // (a WeakSet cannot be enumerated or cleared).
+  let sig = 0;
+  const doneImg = new WeakMap();
+  const doneLazy = new WeakMap();
+  const doneBg = new WeakMap();
   let excludedDomains = new Set();
   const proxyHost = "wsrv.nl"; // proxy is fixed (WSRV_PROXY)
   const pageHost = location.hostname.toLowerCase();
@@ -173,6 +180,7 @@
 
   function applyOpts(next) {
     updateProxyConfig({ ...next, proxyBase: WSRV_PROXY });
+    sig++;                    // invalidate every per-element done marker
     srcsetCache = new WeakMap();
     dataSrcsetCache = new WeakMap();
     proxyUrlCache.clear();
@@ -182,6 +190,26 @@
 
   const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains"]
     .every(k => a[k] === b[k]);
+
+  // ── Settings bridge (ISOLATED world → MAIN world) ──────────────────────────
+  // prehook.js runs in the page's MAIN world where chrome.* APIs do not exist.
+  // Settings cross the execution-world boundary ONLY as a JSON string carried
+  // by the "bh:settings" DOM event — never as shared JavaScript objects.
+  function publishSettings() {
+    if (destroyed || !opts) return;
+    try {
+      window.dispatchEvent(new CustomEvent("bh:settings", {
+        detail: JSON.stringify({
+          enabled:        !!opts.enabled,
+          proxyBase:      WSRV_PROXY,
+          quality:        opts.quality,
+          grayscale:      !!opts.grayscale,
+          maxWidth:       opts.maxWidth,
+          excludeDomains: opts.excludeDomains || ""
+        })
+      }));
+    } catch {}
+  }
 
   function buildProxyUrl(orig) {
     if (!proxyConfig || !isHttp(orig)) return orig;
@@ -267,7 +295,8 @@
   const nativeImgSrcSetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src")?.set;
 
   function rewriteImg(el) {
-    if (!el || doneImg.has(el)) return;
+    if (!el || doneImg.get(el) === sig) return;
+    if (el.hasAttribute?.("data-bh-failed")) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
 
     // Force lazy loading on <img> elements that don't specify it. The HTML
@@ -285,8 +314,8 @@
         const src = el.getAttribute("src");
         const absoluteSrc = src ? resolveHttp(src) : null;
         if (absoluteSrc && !shouldSkip(absoluteSrc) && nativeImgSrcSetter) {
-          // Use the prehook setter with a proxy URL; it recognizes wsrv.nl and
-          // forwards that URL to the browser without wrapping it again.
+          // Use the native setter (captured above) with the proxy URL; the
+          // URL already points at wsrv.nl, so it is forwarded as-is.
           nativeImgSrcSetter.call(el, buildProxyUrl(absoluteSrc));
           rewrote = true;
         }
@@ -303,7 +332,7 @@
       }
     }
 
-    if (rewrote) doneImg.add(el);
+    if (rewrote) doneImg.set(el, sig);
   }
 
   // ── B) Lazy-attr rewriting ─────────────────────────────────────────────────
@@ -315,7 +344,8 @@
   const NON_IMAGE_EXT_RE = /\.(?:mp4|webm|m3u8|mpd|mp3|ogg|wav|js|mjs|css|json|html?|php|pdf|zip|woff2?|ttf)(?:[?#]|$)/i;
 
   function rewriteLazy(el) {
-    if (!el || doneLazy.has(el)) return;
+    if (!el || doneLazy.get(el) === sig) return;
+    if (el.hasAttribute?.("data-bh-failed")) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
     if (NON_IMAGE_TAGS.has(el.tagName)) return;
 
@@ -342,7 +372,7 @@
       }
     }
 
-    if (rewrote) doneLazy.add(el);
+    if (rewrote) doneLazy.set(el, sig);
   }
 
   // ── C) Inline background-image rewriting ──────────────────────────────────
@@ -350,7 +380,8 @@
   // CSS stylesheet backgrounds can't be intercepted without getComputedStyle,
   // but overriding inline style is enough for most dynamic content.
   function rewriteBg(el) {
-    if (!el || doneBg.has(el)) return;
+    if (!el || doneBg.get(el) === sig) return;
+    if (el.hasAttribute?.("data-bh-failed")) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
     const bg = el.style?.backgroundImage;
     if (!bg) return;
@@ -368,7 +399,7 @@
     });
     if (!touched || output === bg) return;
     el.style.backgroundImage = output;
-    doneBg.add(el);
+    doneBg.set(el, sig);
   }
 
   // ── D) <link rel="preload" as="image"> rewriting ──────────────────────────
@@ -377,6 +408,7 @@
   // original full-resolution image.
   function rewritePreload(el) {
     if (!el || el.tagName !== "LINK") return;
+    if (el.hasAttribute?.("data-bh-failed")) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
     if (!/(?:^|\s)preload(?:\s|$)/i.test(el.rel || "")) return;
     if (String(el.getAttribute("as") || "").toLowerCase() !== "image" &&
@@ -387,6 +419,47 @@
     if (!absolute || shouldSkip(absolute)) return;
     el.setAttribute("href", buildProxyUrl(absolute));
   }
+
+  // ── Proxy-failure fallback ────────────────────────────────────────────────
+  // When a proxied image fails to load (proxy unreachable, bad URL), restore
+  // the original URL exactly once. The failure flag is the data-bh-failed DOM
+  // attribute: visible in BOTH execution worlds, so prehook.js never rewrites
+  // the element and this script skips it on re-scans.
+  const restoreOriginal = candidate => {
+    try {
+      const u = new URL(candidate, document.baseURI);
+      if (u.hostname.toLowerCase() !== proxyHost) return null;
+      return u.searchParams.get("url") || null;
+    } catch { return null; }
+  };
+
+  document.addEventListener("error", e => {
+    const t = e.target;
+    if (!t || t.nodeType !== 1) return;
+    if (t.tagName !== "IMG" && t.tagName !== "SOURCE") return;
+    if (t.hasAttribute("data-bh-failed")) return;
+
+    if (t.tagName === "IMG") {
+      const orig = restoreOriginal(t.getAttribute("src") || t.src || "");
+      if (!orig) return;
+      t.setAttribute("data-bh-failed", "1");
+      try {
+        if (nativeImgSrcSetter) nativeImgSrcSetter.call(t, orig);
+        else t.setAttribute("src", orig);
+      } catch {}
+      doneImg.delete(t);
+    } else {
+      const ss = t.getAttribute("srcset");
+      if (!ss) return;
+      const restored = parseSrcset(ss)
+        .map(({ url, desc }) => (restoreOriginal(url) || url) + (desc ? " " + desc : ""))
+        .join(", ");
+      if (restored === ss) return;
+      t.setAttribute("data-bh-failed", "1");
+      t.setAttribute("srcset", restored);
+      doneImg.delete(t);
+    }
+  }, true); // error events do not bubble — listen in the capture phase
 
   const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]", 'link[rel~="preload"]'].join(",");
 
@@ -516,11 +589,13 @@
     if (destroyed) return;
     if (d.bhOpts) {
       applyOpts(d.bhOpts);
+      publishSettings();
       if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
     } else {
       chrome.storage.sync.get(DEFAULTS, synced => {
         if (destroyed) return;
         applyOpts(synced);
+        publishSettings();
         // Write mirror so next page load takes the fast path
         chrome.storage.local.set({ bhOpts: opts });
         if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
@@ -536,11 +611,15 @@
     if (destroyed) return;
     if (area === "local" && changes.bhOpts) {
       applyOpts(changes.bhOpts.newValue || DEFAULTS);
+      publishSettings();
+      if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
     } else if (area === "sync") {
       chrome.storage.sync.get(DEFAULTS, synced => {
         if (destroyed) return;
         const changed = !sameOpts(synced, opts);
         applyOpts(synced);
+        publishSettings();
+        if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
         // The service worker normally refreshes the mirror; only write when it differs.
         if (changed) chrome.storage.local.set({ bhOpts: opts });
       });

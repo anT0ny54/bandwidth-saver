@@ -420,6 +420,25 @@
     el.setAttribute("href", buildProxyUrl(absolute));
   }
 
+  // ── E) <video poster> and <input type="image"> ─────────────────────────────
+  // Parser-set image URLs that bypass every <img> patch; each one is an
+  // original-host fetch (and DNS lookup) if left alone.
+  function rewritePoster(el) {
+    if (!el || doneImg.get(el) === sig) return;
+    if (el.hasAttribute?.("data-bh-failed")) return;
+    if (!opts?.proxyBase || !opts?.enabled) return;
+
+    const attr = el.tagName === "VIDEO" ? "poster" : "src";
+    if (el.tagName !== "VIDEO" && !(el.tagName === "INPUT" &&
+        String(el.type).toLowerCase() === "image")) return;
+
+    const raw = el.getAttribute(attr);
+    const absolute = raw ? resolveHttp(raw) : null;
+    if (!absolute || shouldSkip(absolute)) return;
+    el.setAttribute(attr, buildProxyUrl(absolute));
+    doneImg.set(el, sig);
+  }
+
   // ── Proxy-failure fallback ────────────────────────────────────────────────
   // When a proxied image fails to load (proxy unreachable, bad URL), restore
   // the original URL exactly once. The failure flag is the data-bh-failed DOM
@@ -436,10 +455,23 @@
   document.addEventListener("error", e => {
     const t = e.target;
     if (!t || t.nodeType !== 1) return;
-    if (t.tagName !== "IMG" && t.tagName !== "SOURCE") return;
     if (t.hasAttribute("data-bh-failed")) return;
 
-    if (t.tagName === "IMG") {
+    if (t.tagName === "IMG" || t.tagName === "SOURCE") {
+      // Restore srcset candidates (covers srcset-only <img> and <source>).
+      const ss = t.getAttribute("srcset");
+      if (ss) {
+        const restored = parseSrcset(ss)
+          .map(({ url, desc }) => (restoreOriginal(url) || url) + (desc ? " " + desc : ""))
+          .join(", ");
+        if (restored !== ss) {
+          t.setAttribute("data-bh-failed", "1");
+          t.setAttribute("srcset", restored);
+          doneImg.delete(t);
+          return;
+        }
+      }
+      if (t.tagName !== "IMG") return;
       const orig = restoreOriginal(t.getAttribute("src") || t.src || "");
       if (!orig) return;
       t.setAttribute("data-bh-failed", "1");
@@ -448,24 +480,29 @@
         else t.setAttribute("src", orig);
       } catch {}
       doneImg.delete(t);
-    } else {
-      const ss = t.getAttribute("srcset");
-      if (!ss) return;
-      const restored = parseSrcset(ss)
-        .map(({ url, desc }) => (restoreOriginal(url) || url) + (desc ? " " + desc : ""))
-        .join(", ");
-      if (restored === ss) return;
+    } else if (t.tagName === "VIDEO") {
+      const orig = restoreOriginal(t.getAttribute("poster") || "");
+      if (!orig) return;
       t.setAttribute("data-bh-failed", "1");
-      t.setAttribute("srcset", restored);
+      t.setAttribute("poster", orig);
+      doneImg.delete(t);
+    } else if (t.tagName === "INPUT") {
+      if (String(t.type).toLowerCase() !== "image") return;
+      const orig = restoreOriginal(t.getAttribute("src") || "");
+      if (!orig) return;
+      t.setAttribute("data-bh-failed", "1");
+      t.setAttribute("src", orig);
       doneImg.delete(t);
     }
   }, true); // error events do not bubble — listen in the capture phase
 
-  const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]", 'link[rel~="preload"]'].join(",");
+  const CANDIDATE_SELECTOR = ["img", "source", "video[poster]", 'input[type="image"]',
+    LAZY_SELECTOR, "[style*='url(' i]", 'link[rel~="preload"]'].join(",");
 
   // ── Full-page scan ────────────────────────────────────────────────────────
   function processCandidate(el) {
     rewriteImg(el);
+    rewritePoster(el);
     rewriteLazy(el);
     rewriteBg(el);
     rewritePreload(el);
@@ -508,7 +545,8 @@
         const t = m.target;
         if (!t) continue;
         if ((m.attributeName === "src" || m.attributeName === "srcset") &&
-            (t.tagName === "IMG" || t.tagName === "SOURCE")) {
+            (t.tagName === "IMG" || t.tagName === "SOURCE" ||
+             (t.tagName === "INPUT" && String(t.type).toLowerCase() === "image"))) {
           // Ignore mutations produced by our own proxy writes. Reprocessing a
           // wsrv/excluded value only creates more observer work.
           const cur = t.getAttribute(m.attributeName);
@@ -517,6 +555,9 @@
             doneImg.delete(t);
             imageTargets.add(t);
           }
+        } else if (m.attributeName === "poster" && t.tagName === "VIDEO") {
+          doneImg.delete(t);
+          imageTargets.add(t);
         } else if (m.attributeName === "style") {
           doneBg.delete(t);
           bgTargets.add(t);
@@ -534,7 +575,10 @@
       processCandidate(root);
       root.querySelectorAll?.(CANDIDATE_SELECTOR).forEach(processCandidate);
     }
-    imageTargets.forEach(rewriteImg);
+    imageTargets.forEach(el => {
+      if (el.tagName === "IMG" || el.tagName === "SOURCE") rewriteImg(el);
+      else rewritePoster(el);
+    });
     lazyTargets.forEach(rewriteLazy);
     bgTargets.forEach(rewriteBg);
     preloadTargets.forEach(rewritePreload);
@@ -578,7 +622,7 @@
     childList:       true,
     subtree:         true,
     attributes:      true,
-    attributeFilter: ["src", "srcset", "style", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as"]
+    attributeFilter: ["src", "srcset", "poster", "style", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as"]
   });
 
   // ── Load settings then process page ───────────────────────────────────────

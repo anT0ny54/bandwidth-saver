@@ -189,10 +189,13 @@
   const loadingDesc = Object.getOwnPropertyDescriptor(imgProto, "loading");
   const linkProto = HTMLLinkElement.prototype;
   const linkHrefDesc = Object.getOwnPropertyDescriptor(linkProto, "href");
+  const inputProto = HTMLInputElement.prototype;
+  const inputSrcDesc = Object.getOwnPropertyDescriptor(inputProto, "src");
 
   function nativeSetSrc(el, v) { srcDesc.set.call(el, v); }
   function nativeSetSrcset(el, v) { srcsetDesc?.set?.call(el, v); }
   function nativeSourceSetSrcset(el, v) { sourceSrcsetDesc?.set?.call(el, v); }
+  function nativeSetInputSrc(el, v) { inputSrcDesc?.set?.call(el, v); }
 
   // Spec-style srcset parser: a comma inside a URL (e.g. Cloudinary "w_400,h_300")
   // is part of the URL; only trailing commas or a comma after descriptors end a candidate.
@@ -296,8 +299,17 @@
   function processPreloadLink(el) {
     try {
       if (destroyed) return;
-      if (!isImagePreloadLink(el)) return;
       const stashed = el.dataset.bhPreloadHref;
+      if (!isImagePreloadLink(el)) {
+        // rel/as/type changed after parking: hand the ORIGINAL url back
+        // instead of leaving href stuck at about:blank (broken link).
+        if (stashed) {
+          el.removeAttribute("data-bh-preload-href");
+          const parked = el.getAttribute("href");
+          if (parked !== stashed) setAttr.call(el, "href", stashed);
+        }
+        return;
+      }
       const current = el.getAttribute("href");
       // decidePreloadHref must see the ORIGINAL url, never "about:blank".
       const original = stashed || current;
@@ -341,7 +353,7 @@
         if (isFailed(el)) {
           // Proxy already failed for this element: release the ORIGINAL value.
           const failedSrc = el.dataset.bhPendingSrc;
-          if (failedSrc && el instanceof HTMLImageElement) {
+          if (failedSrc && (el instanceof HTMLImageElement || el instanceof HTMLInputElement)) {
             el.removeAttribute("data-bh-pending-src");
             nativeSetSrc(el, failedSrc);
           }
@@ -354,7 +366,7 @@
           continue;
         }
         const pendingSrc = el.dataset.bhPendingSrc;
-        if (pendingSrc && el instanceof HTMLImageElement) {
+        if (pendingSrc && (el instanceof HTMLImageElement || el instanceof HTMLInputElement)) {
           el.removeAttribute("data-bh-pending-src");
           nativeSetSrc(el, decideSrc(pendingSrc) ?? pendingSrc);
         }
@@ -394,6 +406,35 @@
       }
     }
   });
+
+  // ── Patch <input type="image">.src ─────────────────────────────────────────
+  // Form image buttons fetch through HTMLInputElement.src, bypassing every
+  // <img> patch — an original-host request (and DNS lookup) would leak.
+  if (inputSrcDesc && inputSrcDesc.set) {
+    Object.defineProperty(inputProto, "src", {
+      configurable: true,
+      enumerable: inputSrcDesc.enumerable,
+      get: inputSrcDesc.get,
+      set(value) {
+        try {
+          if (isFailed(this) || String(this.type).toLowerCase() !== "image") {
+            nativeSetInputSrc(this, value);
+            return;
+          }
+          const decided = decideSrc(String(value));
+          if (decided === null) {
+            this.dataset.bhPendingSrc = String(value);
+            pending.add(this);
+            nativeSetInputSrc(this, "about:blank");
+          } else {
+            nativeSetInputSrc(this, decided);
+          }
+        } catch {
+          nativeSetInputSrc(this, value);
+        }
+      }
+    });
+  }
 
   // ── Patch <img>.srcset ─────────────────────────────────────────────────────
   if (srcsetDesc && srcsetDesc.set) {
@@ -558,6 +599,16 @@
           if (!opts.enabled || !opts.proxyBase) return setAttr.call(this, "srcset", v);
           return setAttr.call(this, "srcset", rewriteSrcset(v, this));
         }
+      }
+      if (this instanceof HTMLInputElement && n === "src") {
+        if (String(this.type).toLowerCase() !== "image") return setAttr.call(this, name, value);
+        const decided = decideSrc(String(value));
+        if (decided === null) {
+          this.dataset.bhPendingSrc = String(value);
+          pending.add(this);
+          return setAttr.call(this, "src", "about:blank");
+        }
+        return setAttr.call(this, "src", decided);
       }
       if (this instanceof HTMLSourceElement && n === "srcset") {
         const v = String(value || "");

@@ -1,25 +1,21 @@
 // Bandwidth Saver — service worker
 //
-// ══ DNR RULE 1 (image redirect) — NOT INSTALLED, BY DESIGN ══════════════════
+// ══ WHY DNR RULE 1 (image redirect) WAS REMOVED ══════════════════════════════
 //
-//  Chrome's DNR regexSubstitution inserts the captured URL RAW — it cannot
-//  call encodeURIComponent — so redirecting image URLs with query strings
-//  produces a malformed proxy URL. That part still holds, but the decisive
-//  reason Rule 1 stays uninstalled is resolver ownership: a network-layer
-//  redirect sends the request to wsrv.nl BEFORE the browser resolves the
-//  original hostname, so the hostname would be resolved by wsrv.nl's
-//  resolver (Cloudflare) instead of the user's own DNS. dnsleaktest-style
-//  checks then report Cloudflare as the resolver, which reads as a DNS leak.
+//  Chrome's DNR regexSubstitution inserts the captured URL RAW — there is no
+//  way to call encodeURIComponent on it. So for any image URL that contains
+//  query parameters the substitution produces a malformed proxy URL:
 //
-//  v0.0.9 behavior is intended: the browser resolves every image hostname
-//  through the USER's resolver; only the image BYTES are carried by the
-//  proxy (content.js/prehook.js rewrite the URL after the lookup starts).
+//    Original URL:  https://tvguide.com/img/photo.jpg?auto=webp&width=1092
+//    DNR cannot safely encode the captured source URL for its replacement.
 //
-//  Rule 1's id is still passed to removeRuleIds on every refresh so stale
-//  rules from 0.1.2 installs are cleaned up.
+//  Fix: image src rewriting is now done entirely in content scripts (content.js
+//  and prehook.js) which CAN call encodeURIComponent. This is the only correct
+//  approach in MV3.
 //
-//  DNR Rule 2 (CSP header stripping) is active and unchanged.
+//  DNR Rule 2 (CSP header stripping) is kept — it does not need URL encoding.
 //
+// ══════════════════════════════════════════════════════════════════════════════
 
 // Fixed image proxy. Image requests are rewritten to this URL by content/prehook.
 const WSRV_PROXY = "https://wsrv.nl/";

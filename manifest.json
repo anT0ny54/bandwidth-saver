@@ -43,7 +43,6 @@
         "prehook.js"
       ],
       "run_at": "document_start",
-      "world": "MAIN",
       "all_frames": true
     },
     {

@@ -223,7 +223,7 @@ function doRefreshRules(done) {
       priority: 1,
       action: {
         type: "redirect",
-        redirect: { regexSubstitution: "https://wsrv.nl/?url=\1://\2&" + params }
+        redirect: { regexSubstitution: "https://wsrv.nl/?url=\\1://\\2&" + params }
       },
       condition: redirectCondition
     }];

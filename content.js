@@ -46,7 +46,7 @@
   // KEEP IN SYNC with defaults.js, prehook.js and service-worker.js.
   const DEFAULTS = {
     enabled: true, proxyBase: WSRV_PROXY, quality: 60, grayscale: true,
-    maxWidth: 768, excludeDomains: ""
+    maxWidth: 768, excludeDomains: "", fallbackToOrigin: true
   };
   // ──────────────────────────────────────────────────────────────────────────
 
@@ -85,6 +85,9 @@
   const doneImg = new WeakSet();
   const doneLazy = new WeakSet();
   const doneBg = new WeakSet();
+  const ORIGINAL_SRC_ATTR = "data-bw-original-src";
+  const ORIGINAL_SRCSET_ATTR = "data-bw-original-srcset";
+  const RESTORED_ATTR = "data-bw-restored";
   let excludedDomains = new Set();
   const proxyHost = "wsrv.nl"; // proxy is fixed (WSRV_PROXY)
   const pageHost = location.hostname.toLowerCase();
@@ -189,7 +192,7 @@
     }));
   }
 
-  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains"]
+  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains", "fallbackToOrigin"]
     .every(k => a[k] === b[k]);
 
   function buildProxyUrl(orig) {
@@ -252,6 +255,45 @@
     return out;
   }
 
+  function rememberOriginal(el, src, srcset) {
+    if (!opts?.fallbackToOrigin || !el || el.nodeType !== 1) return;
+    if (src && el.getAttribute(ORIGINAL_SRC_ATTR) !== src) el.setAttribute(ORIGINAL_SRC_ATTR, src);
+    if (srcset && el.getAttribute(ORIGINAL_SRCSET_ATTR) !== srcset) el.setAttribute(ORIGINAL_SRCSET_ATTR, srcset);
+  }
+
+  function restoreOriginalImage(el) {
+    if (!opts?.fallbackToOrigin || !el || el.nodeType !== 1) return false;
+    if (el.getAttribute(RESTORED_ATTR) === "1") return false;
+    const src = el.getAttribute(ORIGINAL_SRC_ATTR);
+    const srcset = el.getAttribute(ORIGINAL_SRCSET_ATTR);
+    if (!src && !srcset) return false;
+
+    el.setAttribute(RESTORED_ATTR, "1");
+    doneImg.add(el);
+    doneLazy.add(el);
+
+    if (el.tagName === "IMG") {
+      if (srcset) el.setAttribute("srcset", srcset);
+      if (src) {
+        if (nativeImgSrcSetter) nativeImgSrcSetter.call(el, src);
+        else el.setAttribute("src", src);
+      }
+    } else if (el.tagName === "SOURCE") {
+      if (srcset) el.setAttribute("srcset", srcset);
+      if (src) el.setAttribute("src", src);
+    } else {
+      return false;
+    }
+    el.removeAttribute(ORIGINAL_SRC_ATTR);
+    el.removeAttribute(ORIGINAL_SRCSET_ATTR);
+    return true;
+  }
+
+  document.addEventListener("error", event => {
+    const t = event.target;
+    if (t && (t.tagName === "IMG" || t.tagName === "SOURCE")) restoreOriginalImage(t);
+  }, true);
+
   // Rewrites a srcset string; cached per element. A rewritten value maps to itself
   // so the mutation our own write triggers is a cache hit, not a re-parse.
   function rewriteSrcsetValue(ss, el, cache) {
@@ -265,6 +307,7 @@
       return buildProxyUrl(absolute) + (desc ? " " + desc : "");
     });
     const output = touched ? parts.join(", ") : ss;
+    if (touched) rememberOriginal(el, null, ss);
     cache.set(el, { input: ss, output });
     return output;
   }
@@ -296,6 +339,7 @@
           const proxy = buildProxyUrl(absoluteSrc);
           // Use the native setter so this isolated-world rewrite cannot recurse
           // through the MAIN-world prehook.
+          rememberOriginal(el, absoluteSrc, null);
           nativeImgSrcSetter.call(el, proxy);
           rewrote = true;
         }
@@ -341,6 +385,7 @@
       const val = attr.value;
       const absolute = val ? resolveHttp(val) : null;
       if (!absolute || NON_IMAGE_EXT_RE.test(absolute) || shouldSkip(absolute)) continue;
+      rememberOriginal(el, /srcset/i.test(attr.name) ? null : absolute, /srcset/i.test(attr.name) ? val : null);
       el.setAttribute(attr.name, buildProxyUrl(absolute));
       rewrote = true;
     }

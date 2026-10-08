@@ -43,7 +43,13 @@
     }
 
     *, *::before, *::after { box-sizing: border-box; }
-    html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; background: var(--bg); }
+    html {
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
+      background: var(--bg);
+      color-scheme: dark light;
+      overscroll-behavior: none;
+    }
     body {
       margin: 0;
       min-width: 280px;
@@ -61,7 +67,7 @@
       width: 100%;
       max-width: 420px;
       margin: 0 auto;
-      padding: 10px;
+      padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px));
     }
 
     .card {
@@ -277,7 +283,7 @@
       align-items: center;
       justify-content: center;
       width: 100%;
-      min-height: 44px;
+      min-height: 48px;
       padding: 0 13px;
       border: 1px solid var(--border);
       border-radius: 10px;

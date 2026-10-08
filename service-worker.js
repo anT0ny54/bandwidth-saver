@@ -31,6 +31,7 @@ const DEFAULTS = {
   grayscale:       true,
   maxWidth:        768,
   excludeDomains:  "",
+  fallbackToOrigin: true,
 };
 
 // Rule 1 is no longer added, but we still remove it on every refresh so any

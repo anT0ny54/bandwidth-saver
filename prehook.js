@@ -19,6 +19,8 @@
   let srcsetCache = new WeakMap();
   let destroyed = false; // true once the page is navigating away; stop all DOM work
   let preloadObserver = null; // declared up front; stop() references it
+  const ORIGINAL_SRC_ATTR = "data-bw-original-src";
+  const ORIGINAL_SRCSET_ATTR = "data-bw-original-srcset";
 
   const safeURL = (u, base = document.baseURI) => {
     try { return new URL(u, base); } catch { return null; }
@@ -65,8 +67,14 @@
     ready = true;
   }
 
-  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains"]
+  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains", "fallbackToOrigin"]
     .every(k => a[k] === b[k]);
+
+  function rememberOriginal(el, src, srcset) {
+    if (!opts?.fallbackToOrigin || !el || el.nodeType !== 1) return;
+    if (src && el.getAttribute(ORIGINAL_SRC_ATTR) !== src) setAttr.call(el, ORIGINAL_SRC_ATTR, src);
+    if (srcset && el.getAttribute(ORIGINAL_SRCSET_ATTR) !== srcset) setAttr.call(el, ORIGINAL_SRCSET_ATTR, srcset);
+  }
 
   function buildProxyUrl(orig) {
     if (!proxyConfig || !isHttp(orig)) return orig;
@@ -152,7 +160,9 @@
         const pendingSrc = el.dataset.bhPendingSrc;
         if (pendingSrc && el instanceof HTMLImageElement) {
           el.removeAttribute("data-bh-pending-src");
-          nativeSetSrc(el, decideSrc(pendingSrc) ?? pendingSrc);
+          const decided = decideSrc(pendingSrc) ?? pendingSrc;
+          if (decided !== pendingSrc) rememberOriginal(el, resolveHttp(pendingSrc) || pendingSrc, null);
+          nativeSetSrc(el, decided);
         }
         const pendingSrcset = el.dataset.bhPendingSrcset;
         if (pendingSrcset) {
@@ -246,6 +256,7 @@
       return buildProxyUrl(absolute) + (desc ? " " + desc : "");
     });
     const output = touched ? parts.join(", ") : ss;
+    if (output !== ss) rememberOriginal(el, null, ss);
     if (el) srcsetCache.set(el, { input: ss, output });
     return output;
   }
@@ -335,6 +346,7 @@
           pending.add(this);
           nativeSetSrc(this, "about:blank");
         } else {
+          if (decided !== original) rememberOriginal(this, resolveHttp(original) || original, null);
           nativeSetSrc(this, decided);
         }
       } catch {
@@ -493,6 +505,7 @@
             pending.add(this);
             return setAttr.call(this, "src", "about:blank");
           }
+          if (decided !== original) rememberOriginal(this, resolveHttp(original) || original, null);
           return setAttr.call(this, "src", decided);
         } else if (n === "srcset") {
           const v = String(value || "");

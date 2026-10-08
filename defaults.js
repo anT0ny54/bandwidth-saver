@@ -14,4 +14,5 @@ export const DEFAULTS = {
   grayscale:      true,  // matches original convertBw: true — grayscale ON by default
   maxWidth:       768,  // HD preset; 0 = no limit
   excludeDomains: "",
+  fallbackToOrigin: true,  // always restore original URL if the proxied image errors
 };

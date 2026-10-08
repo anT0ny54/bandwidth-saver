@@ -3,6 +3,6 @@
     "message": "Bandwidth Saver"
   },
   "extensionDescription": {
-    "message": "Save mobile data by compressing images through a proxy before they load. Supports WebP, grayscale, quality control and max-width limiting."
+    "message": "Save mobile data by processing images only through a proxy and optionally sending the Save-Data: on request header."
   }
 }

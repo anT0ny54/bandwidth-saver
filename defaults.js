@@ -8,6 +8,7 @@
 
 export const DEFAULTS = {
   enabled:        true,
+  saveData:       true,   // Send Save-Data: on on web requests
   proxyBase:      "https://wsrv.nl/",
   quality:        60,    // Normal preset
   grayscale:      true,  // matches original convertBw: true — grayscale ON by default

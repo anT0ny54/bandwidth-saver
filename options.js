@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 
 const enabledEl      = $("enabled");
 const grayscaleEl    = $("grayscale");
+const saveDataEl      = $("saveData");
 const excludeEl      = $("excludeDomains");
 const saveBtn        = $("save");
 const resetAllBtn    = $("resetAll");
@@ -116,6 +117,7 @@ async function load() {
   ]);
   enabledEl.checked   = !!d.enabled;
   grayscaleEl.checked = !!d.grayscale;
+  saveDataEl.checked   = !!d.saveData;
   excludeEl.value     = d.excludeDomains || "";
   savedQuality = d.quality  ?? DEFAULTS.quality;
   savedWidth   = d.maxWidth ?? DEFAULTS.maxWidth;
@@ -179,6 +181,11 @@ enabledEl.addEventListener("change", async () => {
 grayscaleEl.addEventListener("change", async () => {
   await chrome.storage.sync.set({ grayscale: !!grayscaleEl.checked });
   showToast("Reload the page to apply", "warn");
+});
+
+saveDataEl.addEventListener("change", async () => {
+  await chrome.storage.sync.set({ saveData: !!saveDataEl.checked });
+  showToast(saveDataEl.checked ? "Save-Data header enabled" : "Save-Data header disabled", "ok");
 });
 
 // ── Save ──────────────────────────────────────────────────────────────────────

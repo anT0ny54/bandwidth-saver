@@ -25,6 +25,7 @@ const WSRV_PROXY = "https://wsrv.nl/";
 // KEEP IN SYNC with defaults.js, prehook.js and content.js.
 const DEFAULTS = {
   enabled:         true,
+  saveData:        true,
   proxyBase:       WSRV_PROXY,
   quality:         60,
   grayscale:       true,
@@ -36,7 +37,8 @@ const DEFAULTS = {
 // leftover rule from a previous version of the extension is cleaned up.
 const RULE_ID_REDIRECT = 1;  // legacy — removed, never re-added
 const RULE_ID_CSP      = 2;  // strips CSP headers so proxy images can load
-const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP];
+const RULE_ID_SAVEDATA  = 3;  // sends Save-Data: on to compatible web requests
+const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP, RULE_ID_SAVEDATA];
 
 // ── Concurrency guard ─────────────────────────────────────────────────────────
 let refreshing     = false;
@@ -82,7 +84,7 @@ chrome.runtime.onInstalled.addListener(function() {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   mirrorToLocal();
-  if ("enabled" in changes || "excludeDomains" in changes) refreshRules();
+  if ("enabled" in changes || "excludeDomains" in changes || "saveData" in changes) refreshRules();
   if ("enabled" in changes) updateIcon();
 });
 
@@ -205,7 +207,42 @@ function doRefreshRules(done) {
       condition: condition
     }];
 
-    chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds, addRules: addRules }, done);
+    // Rule 3: Replaces the old MV2 webRequestBlocking implementation.
+    // DNR can safely set the request header in MV3 without blocking JavaScript.
+    if (opts.saveData) {
+      // IMPORTANT: urlFilter uses DNR's filter syntax, not a JavaScript
+      // regular expression. "^https?://" therefore does NOT mean "start of
+      // an http(s) URL" and the old rule never matched normal requests.
+      // Use regexFilter for an actual beginning-of-URL expression.
+      var saveDataCondition = {
+        regexFilter: "^https?://"
+      };
+      if (excluded.length) {
+        saveDataCondition.excludedRequestDomains = Array.from(new Set(excluded));
+      }
+
+      addRules.push({
+        id: RULE_ID_SAVEDATA,
+        priority: 2,
+        action: {
+          type: "modifyHeaders",
+          requestHeaders: [
+            { header: "Save-Data", operation: "set", value: "on" }
+          ]
+        },
+        condition: saveDataCondition
+      });
+    }
+
+    chrome.declarativeNetRequest.updateDynamicRules(
+      { removeRuleIds: removeRuleIds, addRules: addRules },
+      function() {
+        if (chrome.runtime.lastError) {
+          console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", chrome.runtime.lastError.message);
+        }
+        done();
+      }
+    );
   });
 }
 

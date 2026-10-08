@@ -217,8 +217,6 @@
 
     // Keep animated/multi-page inputs intact and use a longer browser cache to
     // reduce repeat downloads while retaining a bounded freshness window.
-    // Do not use wsrv.nl default=1: it redirects failed processing to the
-    // original URL, causing the browser to resolve/contact the origin host.
     parts.push("maxage=1d", "page=-1", "n=-1", "default=1", "output=webp");
 
     const result = base + sep + parts.join("&");
@@ -318,17 +316,21 @@
   }
 
   // ── B) Lazy-attr rewriting ─────────────────────────────────────────────────
-  // Rewrites data-src etc. so lazy-loaders pass proxy URLs to prehook.
-  // data-src / data-url are also used for iframes, videos, scripts and share links.
-  // Proxying those through an image CDN would break them.
-  const NON_IMAGE_TAGS = new Set(["IFRAME", "SCRIPT", "A", "LINK", "VIDEO", "AUDIO", "EMBED",
-    "OBJECT", "BUTTON", "INPUT", "FORM", "META"]);
+  // Strict image-only mode: only IMG/SOURCE lazy attributes are rewritten.
+  // Generic data-src/data-url attributes are intentionally left untouched
+  // because their payload can be video, audio, documents, pages, scripts,
+  // embeds, navigation URLs, or other non-image resources.
   const NON_IMAGE_EXT_RE = /\.(?:mp4|webm|m3u8|mpd|mp3|ogg|wav|js|mjs|css|json|html?|php|pdf|zip|woff2?|ttf)(?:[?#]|$)/i;
 
   function rewriteLazy(el) {
     if (!el || doneLazy.has(el)) return;
     if (!opts?.proxyBase || !opts?.enabled) return;
-    if (NON_IMAGE_TAGS.has(el.tagName)) return;
+
+    // STRICT IMAGE-ONLY: data-src/data-url/etc. are ambiguous on generic
+    // elements and are also used for iframe/video/script/navigation URLs.
+    // Only proxy lazy attributes when the element is an actual image source
+    // element. CSS background images are handled separately by rewriteBg().
+    if (el.tagName !== "IMG" && el.tagName !== "SOURCE") return;
 
     let rewrote = false;
 

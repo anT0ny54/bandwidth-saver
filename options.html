@@ -146,7 +146,7 @@
     }
     .switch-row + .switch-row { border-top: 1px solid var(--border); }
     .switch-copy { min-width: 0; }
-    .switch-title { font-size: 13px; font-weight: 700; }
+    .switch-title { font-size: 13px; font-weight: 700; }\n    .switch-title code { padding: 1px 5px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-size: 11px; }
     .switch-hint { margin-top: 2px; color: var(--muted); font-size: 11px; line-height: 1.4; }
 
     .switch {
@@ -472,6 +472,13 @@
             <span class="switch-hint">Convert images to B&amp;W to reduce data</span>
           </span>
           <input type="checkbox" id="grayscale" class="switch">
+        </label>
+        <label class="switch-row" for="saveData">
+          <span class="switch-copy">
+            <span class="switch-title">Send <code>Save-Data: on</code> header</span>
+            <span class="switch-hint">Ask compatible websites for a lower-data version of their content</span>
+          </span>
+          <input type="checkbox" id="saveData" class="switch">
         </label>
       </div>
     </section>

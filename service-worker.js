@@ -17,16 +17,12 @@
 //
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Fixed image proxy. Image requests are rewritten to this URL by content/prehook.
-const WSRV_PROXY = "https://wsrv.nl/";
-
 // Kiwi/Cromite do not support ES module service workers ("type": "module"),
 // so DEFAULTS is inlined here rather than imported from defaults.js.
 // KEEP IN SYNC with defaults.js, prehook.js and content.js.
 const DEFAULTS = {
   enabled:         true,
   saveData:        true,
-  proxyBase:       WSRV_PROXY,
   quality:         60,
   grayscale:       true,
   maxWidth:        768,
@@ -44,6 +40,8 @@ const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP, RULE_ID_SAVEDATA];
 // ── Concurrency guard ─────────────────────────────────────────────────────────
 let refreshing     = false;
 let pendingRefresh = false;
+let mirroring      = false;
+let pendingMirror  = false;
 
 function refreshRules() {
   if (refreshing) { pendingRefresh = true; return; }
@@ -63,9 +61,16 @@ function refreshRules() {
 // here is a window where the browser might start fetching an original image
 // before prehook can intercept it. The service worker keeps bhOpts current.
 function mirrorToLocal() {
+  if (mirroring) { pendingMirror = true; return; }
+  mirroring = true;
   chrome.storage.sync.get(DEFAULTS, opts => {
-    opts.proxyBase = WSRV_PROXY;
-    chrome.storage.local.set({ bhOpts: opts });
+    chrome.storage.local.set({ bhOpts: opts }, () => {
+      mirroring = false;
+      if (pendingMirror) {
+        pendingMirror = false;
+        mirrorToLocal();
+      }
+    });
   });
 }
 
@@ -75,7 +80,6 @@ chrome.runtime.onInstalled.addListener(function() {
   // Top-level mirrorToLocal()/refreshRules()/updateIcon() already ran on this
   // same worker start; only seed missing sync keys here, don't redo the work.
   chrome.storage.sync.get(DEFAULTS, function(d) {
-    d.proxyBase = WSRV_PROXY;
     chrome.storage.sync.set(d, function() {
       mirrorToLocal(); // seed the local mirror for content scripts
     });
@@ -135,7 +139,7 @@ function flushStats() {
   chrome.storage.local.get(
     { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } },
     d => {
-      const s = d.stats || { filesProcessed: 0, bytesProcessed: 0 };
+      const s = d.stats || { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
       s.filesProcessed += delta.filesProcessed;
       s.bytesProcessed += delta.bytesProcessed;
       s.bytesSaved = (s.bytesSaved || 0) + delta.bytesSaved;
@@ -219,6 +223,9 @@ function doRefreshRules(done) {
       // regular expression. "^https?://" therefore does NOT mean "start of
       // an http(s) URL" and the old rule never matched normal requests.
       // Use regexFilter for an actual beginning-of-URL expression.
+      // Intentionally matches ALL request types: Save-Data is a document-wide
+      // client hint — servers may serve lower-data stylesheets, scripts and
+      // fonts as well as images, so restricting resourceTypes would weaken it.
       var saveDataCondition = {
         regexFilter: "^https?://"
       };

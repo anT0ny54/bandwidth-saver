@@ -7,7 +7,7 @@
 ## ⚠️ Read this first
 
 - **Privacy:** rewritten image URLs are sent to **wsrv.nl / Cloudflare**, which fetches the source image. Do not use proxying on sites you consider sensitive; add them to the exclusion list.
-- **Publicly reachable sources:** wsrv.nl must be able to fetch the source image. When a proxied image request fails, the extension restores that image's original URL once and marks it with `data-bh-failed` so it is not immediately proxied again.
+- **Publicly reachable sources:** wsrv.nl must be able to fetch the source image. When a proxied image request fails, the extension restores that image's original URL once and marks it with `data-bw-restored` so it is not immediately proxied again.
 - **CSP:** the service worker removes CSP and CSP-Report-Only response headers from page/frame responses on non-excluded sites so proxy-domain images can load. This reduces the page's CSP protection and is an intentional trade-off.
 - **HTML parser images:** parser-created `<img src>` attributes can begin loading before the isolated content script receives settings. The synchronous MAIN-world hooks cover page-JavaScript assignments; parser-created resources are handled by the content-script layer as soon as settings are available.
 - **Grayscale:** enabled by default. Disable it in the popup/settings if colour is required.
@@ -23,7 +23,7 @@
 - **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`.
 - **Inline CSS backgrounds:** best-effort rewriting of HTTP(S) `url(...)` values in inline `background-image`.
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
-- **Per-image proxy fallback:** failed proxy image loads restore the saved original URL and set `data-bh-failed`.
+- **Per-image proxy fallback:** failed proxy image loads restore the saved original URL and set `data-bw-restored`.
 - **Configurable quality, grayscale, maximum width, and excluded domains.**
 - **Double-proxy protection:** wsrv.nl URLs are never wrapped again.
 - **Bounded URL/cache work:** proxy URL caches are capped and srcset work is cached per element.
@@ -37,11 +37,13 @@
 The shared defaults in `defaults.js` are:
 
 ```text
-Enabled:          true
-Quality:          60
-Max width:        768 px
-Grayscale:        true
-Excluded domains: empty
+Enabled:            true
+Save-Data header:   on
+Quality:            60
+Max width:          768 px
+Grayscale:          true
+Fallback to origin: enabled (failed proxy images restore the original URL once)
+Excluded domains:   empty
 ```
 
 The proxy URL is fixed to:
@@ -52,7 +54,7 @@ https://wsrv.nl/
 
 When maximum width is enabled, the request includes `w=<maxWidth>`, `fit=inside`, `we=1`, and a DPR value clamped to `1..2`. The request also uses `q=<quality>`, optional `filt=greyscale`, `maxage=1d`, `page=-1`, `n=-1`, `output=webp`, and `default=1`.
 
-`default=1` asks wsrv.nl to fall back to the source image if its own processing fails. The extension's `data-bh-failed` fallback is a second, browser-side fallback for a failed proxy image request.
+`default=1` asks wsrv.nl to fall back to the source image if its own processing fails. The extension's `data-bw-restored` fallback is a second, browser-side fallback for a failed proxy image request.
 
 ## 🧩 Execution-world architecture
 
@@ -124,7 +126,7 @@ Its `MutationObserver` batches mutation records into a macrotask and bounds queu
 
 When the MAIN-world layer changes an image to a proxy URL, it retains the original source on that element. If the image emits an error while its current source is wsrv.nl, the extension:
 
-1. sets `data-bh-failed="1"`;
+1. sets `data-bw-restored="1"`;
 2. restores the saved original `src` or `srcset` when available;
 3. restores saved `<picture><source>` candidates when needed;
 4. lets subsequent content-script scans skip that failed image.

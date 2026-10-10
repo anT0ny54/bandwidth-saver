@@ -158,11 +158,12 @@
           }
         }
         const pendingSrc = el.dataset.bhPendingSrc;
-        if (pendingSrc && el instanceof HTMLImageElement) {
+        if (pendingSrc) {
           el.removeAttribute("data-bh-pending-src");
           const decided = decideSrc(pendingSrc) ?? pendingSrc;
           if (decided !== pendingSrc) rememberOriginal(el, resolveHttp(pendingSrc) || pendingSrc, null);
-          nativeSetSrc(el, decided);
+          if (el instanceof HTMLImageElement) nativeSetSrc(el, decided);
+          else setAttr.call(el, "src", decided); // <source> pending src
         }
         const pendingSrcset = el.dataset.bhPendingSrcset;
         if (pendingSrcset) {
@@ -529,6 +530,22 @@
         if (!opts.enabled || !opts.proxyBase) return setAttr.call(this, "srcset", v);
         const rewritten = rewriteSrcset(v, this);
         return setAttr.call(this, "srcset", rewritten);
+      }
+      // <source src> inside <picture>: pages occasionally set src on picture
+      // sources even though srcset is the standard attribute. Restricted to
+      // PICTURE parents so <source> elements inside <video>/<audio> (whose src
+      // is media, not an image) are never routed through the image proxy.
+      if (this instanceof HTMLSourceElement && n === "src" &&
+          this.parentElement && this.parentElement.tagName === "PICTURE") {
+        const original = String(value);
+        const decided = decideSrc(original);
+        if (decided === null) {
+          this.dataset.bhPendingSrc = original;
+          pending.add(this);
+          return setAttr.call(this, "src", "about:blank");
+        }
+        if (decided !== original) rememberOriginal(this, resolveHttp(original) || original, null);
+        return setAttr.call(this, "src", decided);
       }
     } catch {
       // If an eligible image rewrite unexpectedly fails, do not fall through to

@@ -45,7 +45,7 @@
   // Minimal fallback used only when the local settings mirror is unavailable.
   // KEEP IN SYNC with defaults.js, prehook.js and service-worker.js.
   const DEFAULTS = {
-    enabled: true, proxyBase: WSRV_PROXY, quality: 60, grayscale: true,
+    enabled: true, saveData: true, quality: 60, grayscale: true,
     maxWidth: 768, excludeDomains: "", fallbackToOrigin: true
   };
   // ──────────────────────────────────────────────────────────────────────────
@@ -138,10 +138,14 @@
   function shouldSkip(url) {
     if (!opts?.enabled || !opts?.proxyBase) return true;
 
-    const absolute = resolveHttp(url);
-    if (!absolute) return true;
+    // Single parse: build the URL object once and derive the absolute href
+    // from it. The old code resolved to a string here and then re-parsed the
+    // same string with safeURL() below, doubling URL parsing per candidate.
+    const u = safeURL(url);
+    if (!u || !/^https?:$/.test(u.protocol)) return true;
+    const absolute = u.href;
 
-    // Fast exits before URL parsing. These checks run for every candidate image.
+    // Fast string exits. These checks run for every candidate image.
     // Keep them conservative so valid image URLs are never skipped accidentally.
     if (pageExcluded) return true;
     const lower = absolute.toLowerCase();
@@ -151,9 +155,6 @@
         lower.endsWith(".svg") || lower.includes(".svg?") || lower.includes(".svg#")) return true;
     if (isTinyOrTracking(lower)) return true;
     if (TRACKING_RE.test(absolute)) return true;
-
-    const u = safeURL(absolute);
-    if (!u) return true;
 
     // Already proxied (handles non-https/case variations safely).
     if (u.hostname.toLowerCase() === proxyHost) return true;

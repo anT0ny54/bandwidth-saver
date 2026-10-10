@@ -573,8 +573,12 @@
               <div class="stat-label">Proxy bytes</div>
               <div class="stat-value" id="statBytes">—</div>
             </div>
+            <div class="stat">
+              <div class="stat-label">Bytes saved</div>
+              <div class="stat-value" id="statSaved">—</div>
+            </div>
           </div>
-          <div class="hint">Counts bytes received from wsrv.nl for processed images.</div>
+          <div class="hint">Proxy bytes are processed response sizes. Savings use upstream bytes minus proxy bytes when both response headers are available.</div>
           <div class="button-row">
             <button id="resetStats" class="btn" type="button">Reset stats</button>
           </div>

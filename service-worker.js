@@ -109,9 +109,10 @@ function updateIcon() {
 // Non-blocking — only observes, never delays requests.
 function getHeaderInt(headers, name) {
   if (!Array.isArray(headers)) return null;
-  const h = headers.find(h => h.name.toLowerCase() === name);
-  const n = h ? parseInt(h.value, 10) : NaN;
-  return Number.isNaN(n) ? null : n;
+  const target = String(name).toLowerCase();
+  const h = headers.find(h => String(h.name).toLowerCase() === target);
+  const n = h ? Number.parseInt(h.value, 10) : NaN;
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 if (chrome.webRequest) {
@@ -122,7 +123,7 @@ if (chrome.webRequest) {
   );
 }
 
-let pendingStats = { filesProcessed: 0, bytesProcessed: 0 };
+let pendingStats = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
 let statsFlushTimer = null;
 let statsFlushInProgress = false;
 
@@ -130,14 +131,14 @@ function flushStats() {
   if (statsFlushInProgress || !pendingStats.filesProcessed) return;
   statsFlushInProgress = true;
   const delta = pendingStats;
-  pendingStats = { filesProcessed: 0, bytesProcessed: 0 };
+  pendingStats = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
   chrome.storage.local.get(
-    { stats: { filesProcessed: 0, bytesProcessed: 0 } },
+    { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } },
     d => {
       const s = d.stats || { filesProcessed: 0, bytesProcessed: 0 };
-      delete s.bytesSaved; // retire the old unused stats field from prior versions.
       s.filesProcessed += delta.filesProcessed;
       s.bytesProcessed += delta.bytesProcessed;
+      s.bytesSaved = (s.bytesSaved || 0) + delta.bytesSaved;
       chrome.storage.local.set({ stats: s }, () => {
         statsFlushInProgress = false;
         if (pendingStats.filesProcessed) scheduleStatsFlush();
@@ -158,14 +159,17 @@ function onProxyCompleted({ url, responseHeaders, fromCache, statusCode }) {
   if (fromCache || !url.startsWith("https://wsrv.nl/")) return;
   if (typeof statusCode === "number" && (statusCode < 200 || statusCode >= 300)) return;
 
-  // wsrv.nl does not expose the old Bandwidth Hero x-bytes-saved /
-  // x-original-size headers. Track the actual processed image bytes delivered
-  // to the browser instead, which is the bandwidth figure we can verify.
+  // Content-Length is the processed image delivered to the requester;
+  // X-Upstream-Response-Length is the source image received by wsrv.nl.
+  // Count delivered bytes whenever available. Savings are only measurable
+  // when both headers exist, and may be negative if processing increases size.
   const bytesReceived = getHeaderInt(responseHeaders, "content-length");
   if (bytesReceived === null) return;
 
+  const upstreamBytes = getHeaderInt(responseHeaders, "x-upstream-response-length");
   pendingStats.filesProcessed += 1;
   pendingStats.bytesProcessed += bytesReceived;
+  if (upstreamBytes !== null) pendingStats.bytesSaved += upstreamBytes - bytesReceived;
   scheduleStatsFlush();
 }
 

@@ -11,6 +11,7 @@ const resetAllBtn    = $("resetAll");
 const resetStatsBtn  = $("resetStats");
 const statImagesEl   = $("statImages");
 const statBytesEl    = $("statBytes");
+const statSavedEl    = $("statSaved");
 const toastEl        = $("toast");
 const versionEl       = $("extensionVersion");
 const customQualityEl = $("customQuality");
@@ -44,10 +45,12 @@ function showToast(msg, type = "") {
 
 function fmtBytes(n) {
   n = Number(n) || 0;
-  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + " GB";
-  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(2) + " MB";
-  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(2) + " KB";
-  return n + " B";
+  const sign = n < 0 ? "-" : "";
+  const abs = Math.abs(n);
+  if (abs >= 1 << 30) return sign + (abs / (1 << 30)).toFixed(2) + " GB";
+  if (abs >= 1 << 20) return sign + (abs / (1 << 20)).toFixed(2) + " MB";
+  if (abs >= 1 << 10) return sign + (abs / (1 << 10)).toFixed(2) + " KB";
+  return sign + abs + " B";
 }
 
 async function reloadCurrentPage() {
@@ -113,7 +116,7 @@ function readWidth() {
 async function load() {
   const [d, s] = await Promise.all([
     chrome.storage.sync.get(DEFAULTS),
-    chrome.storage.local.get({ stats: { filesProcessed: 0, bytesProcessed: 0 } })
+    chrome.storage.local.get({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } })
   ]);
   enabledEl.checked   = !!d.enabled;
   grayscaleEl.checked = !!d.grayscale;
@@ -127,6 +130,7 @@ async function load() {
   const st = s.stats || {};
   statImagesEl.textContent = (st.filesProcessed || 0).toLocaleString();
   statBytesEl.textContent  = fmtBytes(st.bytesProcessed);
+  statSavedEl.textContent  = fmtBytes(st.bytesSaved || 0);
 }
 load();
 
@@ -236,7 +240,7 @@ async function resetAll() {
 }
 
 async function resetStats() {
-  await chrome.storage.local.set({ stats: { filesProcessed: 0, bytesProcessed: 0 } });
+  await chrome.storage.local.set({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } });
   await load();
   showToast("Stats cleared");
 }

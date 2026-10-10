@@ -11,7 +11,7 @@
 - **CSP:** the service worker removes CSP and CSP-Report-Only response headers from page/frame responses on non-excluded sites so proxy-domain images can load. This reduces the page's CSP protection and is an intentional trade-off.
 - **HTML parser images:** parser-created `<img src>` attributes can begin loading before the isolated content script receives settings. The synchronous MAIN-world hooks cover page-JavaScript assignments; parser-created resources are handled by the content-script layer as soon as settings are available.
 - **Grayscale:** enabled by default. Disable it in the popup/settings if colour is required.
-- **Statistics:** the extension reports proxy bytes delivered from non-cached wsrv.nl image responses; it does not claim those bytes are the exact amount saved.
+- **Statistics:** non-cached successful wsrv.nl image responses are counted from response headers. `Content-Length` measures processed bytes delivered to the browser; `X-Upstream-Response-Length` measures source bytes received by wsrv.nl. When both are present, estimated savings are upstream bytes minus delivered bytes. The custom header may be absent, so savings are only accumulated for responses with both usable headers.
 
 ## ✨ Features
 
@@ -50,7 +50,7 @@ The proxy URL is fixed to:
 https://wsrv.nl/
 ```
 
-When maximum width is enabled, the request includes `w=<maxWidth>`, `fit=inside`, `we=1`, and a DPR value clamped to `1..2`. The request also uses `q=<quality>`, optional `filt=greyscale`, `maxage=30d`, `page=-1`, `n=-1`, `output=webp`, and `default=1`.
+When maximum width is enabled, the request includes `w=<maxWidth>`, `fit=inside`, `we=1`, and a DPR value clamped to `1..2`. The request also uses `q=<quality>`, optional `filt=greyscale`, `maxage=1d`, `page=-1`, `n=-1`, `output=webp`, and `default=1`.
 
 `default=1` asks wsrv.nl to fall back to the source image if its own processing fails. The extension's `data-bh-failed` fallback is a second, browser-side fallback for a failed proxy image request.
 
@@ -154,10 +154,11 @@ The extension makes these decisions from URLs; it does not download an image mer
 
 The settings page shows:
 
-- **Images processed:** successful non-cached wsrv.nl image responses with a usable `content-length`
-- **Bytes delivered:** the corresponding `content-length` totals
+- **Images:** successful, non-cached wsrv.nl image responses with a usable `Content-Length`
+- **Proxy bytes:** the sum of `Content-Length`, representing processed image bytes delivered to the browser
+- **Bytes saved:** the sum of `X-Upstream-Response-Length - Content-Length` for responses where both headers contain valid non-negative byte counts
 
-These are **not bytes saved**. wsrv.nl does not provide the original image size through the statistics interface used by this extension, and responses without `content-length` are not counted.
+`X-Upstream-Response-Length` represents the number of bytes wsrv.nl received from the original image server; `Content-Length` represents the processed response size delivered by wsrv.nl. For example, 100,000 upstream bytes and 30,000 delivered bytes means 70,000 bytes saved (70%). Savings are an estimate for observed individual responses, not total account usage. If the custom upstream header is missing, that response contributes to image/proxy-byte totals but not to the savings total. Savings can be negative when the processed image is larger than its source. Browser JavaScript CORS visibility is separate from this extension statistic: the extension reads response headers through the browser extension `webRequest` API.
 
 ## ⚙️ Settings and UI
 
@@ -270,10 +271,11 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 | Blocklist | DNS-over-HTTPS (DoH) |
 | :--- | :--- |
 | Multi Pro + TIF | `https://freedns.koyeb.app/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dns.mydoh.workers.dev/dns-query` (Recommended) |
 | Multi Pro + TIF | `https://dns-pi.vercel.app/api/doh/dns-query` (Recommended) |
 | Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
-| Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not used in 15 minutes) |
-| Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` (Recommended, but will sleep if not used in 15 minutes) |
+| Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
+| Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
 
 ## ⚡ Bandwidth Hero Server
 

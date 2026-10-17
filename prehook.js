@@ -67,9 +67,6 @@
     ready = true;
   }
 
-  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains", "fallbackToOrigin"]
-    .every(k => a[k] === b[k]);
-
   function rememberOriginal(el, src, srcset) {
     if (!opts?.fallbackToOrigin || !el || el.nodeType !== 1) return;
     if (src && el.getAttribute(ORIGINAL_SRC_ATTR) !== src) setAttr.call(el, ORIGINAL_SRC_ATTR, src);
@@ -517,7 +514,7 @@
           }
           if (!opts.enabled || !opts.proxyBase) return setAttr.call(this, "srcset", v);
           const rewritten = rewriteSrcset(v, this);
-        return setAttr.call(this, "srcset", rewritten);
+          return setAttr.call(this, "srcset", rewritten);
         }
       }
       if (this instanceof HTMLSourceElement && n === "srcset") {

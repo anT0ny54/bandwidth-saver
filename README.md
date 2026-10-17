@@ -79,7 +79,7 @@ Page JavaScript / HTML parser
 
 ### `prehook.js` — MAIN world
 
-Injected at `document_start`, before page JavaScript runs. It captures native descriptors before patching and hooks:
+Injected at `document_start`, in the MAIN execution world (`"world": "MAIN"` is declared explicitly in `manifest.json`), before page JavaScript runs. It captures native descriptors before patching and hooks:
 
 - `HTMLImageElement.prototype.src`
 - `HTMLImageElement.prototype.srcset`
@@ -187,7 +187,7 @@ The settings page provides:
 - statistics and reset
 - reset-to-defaults
 
-Quality and width changes reload the active page when needed. Existing resources are not retroactively guaranteed to change without a reload.
+Quality, width, and excluded-domain changes reload the active page when needed. Existing resources are not retroactively guaranteed to change without a reload.
 
 ## 🔐 Permissions
 
@@ -210,7 +210,7 @@ From `manifest.json`:
 3. Enable Developer mode where required.
 4. Load the project directory as an unpacked extension, or select `manifest.json` for Firefox.
 
-The manifest declares a Chromium-style MV3 service worker and the MAIN-world content script explicitly. Browser-specific support should be verified on the target browser; the service worker intentionally uses classic callback-based APIs rather than ES-module syntax for compatibility with Chromium-derived browsers such as Kiwi/Cromite.
+The manifest declares both a Chromium-style MV3 service worker and a Firefox `scripts` event page for the same background file, and the MAIN-world content script world explicitly. Browser-specific support should be verified on the target browser; the background script intentionally uses classic callback-based APIs rather than ES-module syntax for compatibility with Chromium-derived browsers such as Kiwi/Cromite.
 
 ## 🏗️ Build
 

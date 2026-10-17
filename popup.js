@@ -175,6 +175,8 @@ excludeBtn.addEventListener("click", async () => {
   if (excludedDomain) list.delete(excludedDomain);
   else list.add(currentHost);
   await chrome.storage.sync.set({ excludeDomains: Array.from(list).join(" ") });
+  state.excludeDomains = Array.from(list).join(" ");
+  loadSiteUI(state); // refresh the pill/button immediately
   showNudge(); // page must reload for the change to take effect
 });
 

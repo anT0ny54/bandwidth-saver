@@ -217,9 +217,11 @@ async function save() {
     excludeDomains,
   });
 
-  // Reload whenever a URL-shaping setting changed, not just quality.
+  // Reload whenever a URL-shaping setting changed (quality, max width, or the
+  // exclusion list) — exclusion changes only take effect on a fresh page load.
   if (quality  !== Number(current.quality  ?? DEFAULTS.quality) ||
-      maxWidth !== Number(current.maxWidth ?? DEFAULTS.maxWidth)) {
+      maxWidth !== Number(current.maxWidth ?? DEFAULTS.maxWidth) ||
+      excludeDomains !== String(current.excludeDomains ?? DEFAULTS.excludeDomains)) {
     await reloadCurrentPage();
   }
 

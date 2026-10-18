@@ -205,7 +205,6 @@
     let i = 0;
     while (i < n) {
       while (i < n && /[\s,]/.test(ss[i])) i++;
-      if (i >= 1) { /* marker */ }
       if (i >= n) break;
       const s = i;
       while (i < n && !/\s/.test(ss[i])) i++;
@@ -264,7 +263,7 @@
     // because content.js also rewrites parser-created images; without this guard
     // the prehook wraps the wsrv URL a second time.
     if (urlObj.hostname === "wsrv.nl") return original;
-    if (!ready || !opts) return null; // queue until settings are unknown
+    if (!ready || !opts) return null; // queue until settings are known
     if (!opts.enabled || !opts.proxyBase) return original;
     if (pageExcluded) return original;
     if (skipAbsolute(urlObj)) return original;
@@ -287,7 +286,7 @@
     if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
     // Already a proxy URL (e.g. re-processing our own write): leave it alone.
     if (urlObj.hostname === "wsrv.nl") return original;
-    if (!ready || !opts) return null; // queue until settings are unknown
+    if (!ready || !opts) return null; // queue until settings are known
     if (!opts.enabled || !opts.proxyBase) return original;
     if (pageExcluded) return original;
     if (skipAbsolute(urlObj)) return original;

@@ -31,7 +31,6 @@
 - **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms.
 - **CSP handling:** Declarative Net Request removes CSP response headers on eligible page/frame requests.
 - **Reproducible build:** `build.sh` validates, stages, timestamps, packages, and verifies the extension deterministically.
-- **No analytics or tracking:** the extension contains no telemetry, no beacons, and no tracking-pixel/URL-pattern matching. Only the image proxy (wsrv.nl) sees rewritten image URLs.
 
 ### Default settings
 
@@ -267,7 +266,11 @@ Bandwidth Saver builds on ideas and techniques from the open-source bandwidth-sa
 
 See `LICENSE` and the source files for applicable third-party licensing and attribution.
 
-## 🌐 Free DNS Services
+## 🔗 Related projects (not part of this repository)
+
+The services below are maintained separately and are **not** part of this repository, its build pipeline, or its release cycle. They are listed here for convenience only.
+
+### 🌐 Free DNS Services
 
 High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 
@@ -280,7 +283,7 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 | Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
 | Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
 
-## ⚡ Bandwidth Hero Server
+### ⚡ Bandwidth Hero Server
 
 A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
 

@@ -82,9 +82,12 @@
   const safeURL = (u, base = document.baseURI) => {
     try { return new URL(u, base); } catch { return null; }
   };
-  const resolveHttp = u => {
+  // Parse once: callers keep the returned URL object and reuse it for
+  // shouldSkip(), buildProxyUrl(u.href) and rememberOriginal() — the string
+  // form is never re-parsed.
+  const resolveImage = u => {
     const resolved = safeURL(u);
-    return resolved && /^https?:$/.test(resolved.protocol) ? resolved.href : null;
+    return resolved && /^https?:$/.test(resolved.protocol) ? resolved : null;
   };
   const isHttp  = u => /^https?:\/\//i.test(u);
 
@@ -113,30 +116,23 @@
     return false;
   }
 
-  function shouldSkip(url) {
+  function shouldSkip(u) {
     if (!opts?.enabled) return true;
-
-    // Single parse: build the URL object once and derive the absolute href
-    // from it. The old code resolved to a string here and then re-parsed the
-    // same string with safeURL() below, doubling URL parsing per candidate.
-    const u = safeURL(url);
-    if (!u || !/^https?:$/.test(u.protocol)) return true;
-    const absolute = u.href;
 
     // Fast string exits. These checks run for every candidate image.
     // Keep them conservative so valid image URLs are never skipped accidentally.
     if (pageExcluded) return true;
-    const lower = absolute.toLowerCase();
-    const host = u.hostname.toLowerCase();
-    // Already proxied (handles non-https/case variations safely).
-    if (host === proxyHost) return true;
+    const lower = u.href.toLowerCase();
+
+    // Already proxied (hostname check covers scheme/case/port variations).
+    if (u.hostname.toLowerCase() === proxyHost) return true;
     if (lower.includes("favicon")) return true;
     if (lower.endsWith(".ico") || lower.includes(".ico?") || lower.includes(".ico#") ||
         lower.endsWith(".svg") || lower.includes(".svg?") || lower.includes(".svg#")) return true;
     if (isTiny(lower)) return true;
 
     // Excluded image host, including subdomains.
-    if (excludedHost(host)) return true;
+    if (excludedHost(u.hostname.toLowerCase())) return true;
 
     return false;
   }
@@ -164,7 +160,7 @@
   function publishSettings() {
     if (destroyed || !opts) return;
     document.dispatchEvent(new CustomEvent(SETTINGS_EVENT, {
-      detail: JSON.stringify({ ...opts })
+      detail: JSON.stringify(opts)
     }));
   }
 
@@ -277,10 +273,10 @@
     if (cached && (cached.input === ss || cached.output === ss)) return cached.output;
     let touched = false;
     const parts = parseSrcset(ss).map(({ url, desc }) => {
-      const absolute = resolveHttp(url);
-      if (!absolute || shouldSkip(absolute)) return url + (desc ? " " + desc : "");
+      const u = resolveImage(url);
+      if (!u || shouldSkip(u)) return url + (desc ? " " + desc : "");
       touched = true;
-      return buildProxyUrl(absolute) + (desc ? " " + desc : "");
+      return buildProxyUrl(u.href) + (desc ? " " + desc : "");
     });
     const output = touched ? parts.join(", ") : ss;
     if (touched) rememberOriginal(el, null, ss);
@@ -295,6 +291,7 @@
 
   function rewriteImg(el) {
     if (!el || doneImg.has(el)) return;
+    if (el.getAttribute(RESTORED_ATTR) === "1") return; // failed proxy: keep the restored original
     if (!opts?.enabled) return;
 
     // Force lazy loading on <img> elements that don't specify it. The HTML
@@ -310,13 +307,12 @@
       // src
       if (el.tagName === "IMG") {
         const src = el.getAttribute("src");
-        const absoluteSrc = src ? resolveHttp(src) : null;
-        if (absoluteSrc && !shouldSkip(absoluteSrc) && nativeImgSrcSetter) {
-          const proxy = buildProxyUrl(absoluteSrc);
+        const u = src ? resolveImage(src) : null;
+        if (u && !shouldSkip(u) && nativeImgSrcSetter) {
           // Use the native setter so this isolated-world rewrite cannot recurse
           // through the MAIN-world prehook.
-          rememberOriginal(el, absoluteSrc, null);
-          nativeImgSrcSetter.call(el, proxy);
+          rememberOriginal(el, u.href, null);
+          nativeImgSrcSetter.call(el, buildProxyUrl(u.href));
           rewrote = true;
         }
       }
@@ -344,6 +340,7 @@
 
   function rewriteLazy(el) {
     if (!el || doneLazy.has(el)) return;
+    if (el.getAttribute(RESTORED_ATTR) === "1") return; // failed proxy: keep the restored original
     if (!opts?.enabled) return;
 
     // STRICT IMAGE-ONLY: data-src/data-url/etc. are ambiguous on generic
@@ -359,12 +356,12 @@
     for (const attr of el.attributes) {
       if (!lazyAttrSet.has(attr.name)) continue;
       const val = attr.value;
-      const absolute = val ? resolveHttp(val) : null;
-      if (!absolute || NON_IMAGE_EXT_RE.test(absolute) || shouldSkip(absolute)) continue;
+      const u = val ? resolveImage(val) : null;
+      if (!u || NON_IMAGE_EXT_RE.test(u.href) || shouldSkip(u)) continue;
       // LAZY_ATTRS never contains a srcset attribute (data-srcset is handled
       // separately below), so only the original src is remembered here.
-      rememberOriginal(el, absolute, null);
-      el.setAttribute(attr.name, buildProxyUrl(absolute));
+      rememberOriginal(el, u.href, null);
+      el.setAttribute(attr.name, buildProxyUrl(u.href));
       rewrote = true;
     }
 
@@ -387,6 +384,7 @@
   // but overriding inline style is enough for most dynamic content.
   function rewriteBg(el) {
     if (!el || doneBg.has(el)) return;
+    if (el.getAttribute(RESTORED_ATTR) === "1") return; // failed proxy: keep the restored original
     if (!opts?.enabled) return;
     const bg = el.style?.backgroundImage;
     if (!bg) return;
@@ -397,10 +395,10 @@
     let touched = false;
     const output = bg.replace(urlRe, (full, quote, quoted, bare) => {
       const raw = String(quote ? quoted : bare || "").trim();
-      const absolute = raw ? resolveHttp(raw) : null;
-      if (!absolute || shouldSkip(absolute)) return full;
+      const u = raw ? resolveImage(raw) : null;
+      if (!u || shouldSkip(u)) return full;
       touched = true;
-      return `url("${buildProxyUrl(absolute)}")`;
+      return `url("${buildProxyUrl(u.href)}")`;
     });
     if (!touched || output === bg) return;
     el.style.backgroundImage = output;
@@ -419,9 +417,9 @@
         !/^image\//i.test(el.getAttribute("type") || "")) return;
 
     const href = el.getAttribute("href");
-    const absolute = href ? resolveHttp(href) : null;
-    if (!absolute || shouldSkip(absolute)) return;
-    el.setAttribute("href", buildProxyUrl(absolute));
+    const u = href ? resolveImage(href) : null;
+    if (!u || shouldSkip(u)) return;
+    el.setAttribute("href", buildProxyUrl(u.href));
   }
 
   const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]", 'link[rel~="preload"]'].join(",");
@@ -472,11 +470,13 @@
         if (!t) continue;
         if ((m.attributeName === "src" || m.attributeName === "srcset") &&
             (t.tagName === "IMG" || t.tagName === "SOURCE")) {
+          // A restored element's original URL must not be re-proxied.
+          if (t.getAttribute(RESTORED_ATTR) === "1") continue;
           // Ignore mutations produced by our own proxy writes. Reprocessing a
           // wsrv/excluded value only creates more observer work.
           const cur = t.getAttribute(m.attributeName);
-          const abs = cur ? resolveHttp(cur) : null;
-          if (abs && !shouldSkip(abs)) {
+          const u = cur ? resolveImage(cur) : null;
+          if (u && !shouldSkip(u)) {
             doneImg.delete(t);
             imageTargets.add(t);
           }

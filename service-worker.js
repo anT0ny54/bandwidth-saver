@@ -13,7 +13,10 @@
 //  and prehook.js) which CAN call encodeURIComponent. This is the only correct
 //  approach in MV3.
 //
-//  DNR Rule 2 (CSP header stripping) is kept — it does not need URL encoding.
+//  DNR is kept only for header work, which needs no URL encoding: Rule 2
+//  strips CSP response headers (active while the extension is enabled) and
+//  Rule 3 adds the Save-Data request header (only when the saveData setting
+//  is on).
 //
 // ══════════════════════════════════════════════════════════════════════════════
 

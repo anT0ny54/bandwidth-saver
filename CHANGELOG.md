@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   impossible there (data-srcset is handled in a separate branch). The
   impossible branch is removed with a comment explaining why only the original
   src is remembered.
+- **MAIN-world catch fallbacks** (`prehook.js`): the `src`/`srcset`/`loading`
+  and `link.href` setter catch handlers still forwarded the raw assigned
+  value; a Symbol rethrows on string conversion and escaped as an uncaught
+  error. Every catch fallback now uses the value converted once, safely,
+  before the try block.
+- **Restored images re-proxied** (`prehook.js`, `content.js`):
+  `data-bw-restored` was only honored by the isolated full-scan. The
+  MAIN-world property setters and `setAttribute` patch, and the
+  content-script mutation re-scan, now pass restored elements through
+  untouched, so a restored original `src`/`srcset` (including `<source>`
+  candidates) is no longer silently routed back through the proxy.
 
 ### Removed
 
@@ -34,37 +45,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inspects or matches tracking-related URL patterns; content images are still
   skipped when they carry explicit tiny dimensions (≤ 32) in width/height
   query parameters, and the README skip list reflects this.
+- **Dead `proxyBase` plumbing** (`prehook.js`, `content.js`): the proxy is
+  hardcoded to `wsrv.nl`, so the injected `proxyBase` field and every
+  always-true `!opts.proxyBase` check are removed; the settings event payload
+  no longer carries the field.
+- **Constant `sep: "?"` proxy-config field** — inlined at the single call
+  site in both worlds.
 
 ### Changed
 
 - Corrected a stale DNR-rules comment in the service worker ("only Rule 2 is
   active" — Rule 3/Save-Data is also conditionally active).
+- `content.js` parses each candidate URL exactly once (`resolveImage`
+  returns the `URL` object reused by `shouldSkip`/`buildProxyUrl`), replacing
+  the previous resolve-then-reparse flow.
+- Corrected the service-worker banner comment, which still claimed only DNR
+  Rule 2 exists; Rules 2 (CSP stripping) and 3 (Save-Data header) are both
+  described accurately now.
 - Corrected the MAIN-world proxy-comment conflict: the code intentionally
   sends `default=1` (the proxy falls back to the source image when its own
   processing fails); the comment that claimed the opposite is fixed.
 - Version bumped to `0.1.7`.
-### Fixed
-
-- Potential uncaught exception in the MAIN-world `src`/`srcset` catch handlers
-  when a page assigned a Symbol or unstringifiable value: the catch paths fell
-  back to the raw assigned value, which the native setter would re-convert and
-  throw on. Values are now converted once, outside the handlers, and the catch
-  paths reuse the safe conversion (`prehook.js`).
-- Stale `data-bh-pending-loading` left on elements when the native `loading`
-  descriptor is unavailable: the queued value was never flushed or cleared
-  (`prehook.js`).
-
-### Removed
-
-- Dead `proxyBase` conditionals across `content.js` and `prehook.js`:
-  `applyOpts()` always injects the hardcoded proxy, so `!opts.proxyBase`
-  could never be true. The settings payload no longer carries a redundant
-  `proxyBase` key.
-- Redundant `sep` constant in the proxy config (both worlds) and duplicate
-  hostname parsing in `shouldSkip()` (`content.js`).
-
-### Changed
-
-- Merged the byte-for-byte duplicated `decideSrc()` and `decidePreloadHref()`
-  into a single `decideUrl()` (`prehook.js`).
-

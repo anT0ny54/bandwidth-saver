@@ -25,10 +25,6 @@
   const safeURL = (u, base = document.baseURI) => {
     try { return new URL(u, base); } catch { return null; }
   };
-  const resolveHttp = u => {
-    const resolved = safeURL(u);
-    return resolved && /^https?:$/.test(resolved.protocol) ? resolved.href : null;
-  };
   const toDomainSet = text => new Set(
     String(text || "")
       .split(/[, \n\r\t]+/)
@@ -37,16 +33,11 @@
       .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""))
   );
   const isHttp = u => /^https?:\/\//i.test(u);
-  const TINY_URL_RE = /(?:^|[._\/\-])(1x1|2x2|pixel|spacer|tracking)(?:[._\/\-]|$)/i;
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
-  const isTinyOrTracking = u => TINY_URL_RE.test(u) || TINY_DIM_RE.test(u);
+  const isTiny = u => TINY_DIM_RE.test(u);
   const SVG_URL_RE = /\.svg(?:[?#]|$)/i;
-  // Parity with content.js (KEEP IN SYNC): favicons/icons and known ad/tracking URLs.
+  // Parity with content.js (KEEP IN SYNC): favicons/icons.
   const ICON_URL_RE = /favicon|\.ico(?:[?#]|$)/i;
-  const TRACKING_RE = /pagead|(?:pixel|cleardot)\.*\.(?:gif|jpg|jpeg)|google\.(?:[a-z.]+)\/(?:ads|generate_204|.*\/log204)+|google-analytics\.(?:[a-z.]+)\/(?:r|collect)+|youtube\.(?:[a-z.]+)\/(?:api|ptracking|player_204|live_204)+|doubleclick\.(?:[a-z.]+)\/(?:pcs|pixel|r)+|googlesyndication\.(?:[a-z.]+)\/ddm|pixel\.facebook\.(?:[a-z.]+)|facebook\.(?:[a-z.]+)\/(?:impression\.php|tr)+|ad\.bitmedia\.io|yahoo\.(?:[a-z.]+)\/pixel|criteo\.net\/img|ad\.doubleclick\.net/i;
-  const isWsrvUrl = u => {
-    try { return new URL(u).hostname.toLowerCase() === "wsrv.nl"; } catch { return false; }
-  };
 
   function updateProxyConfig(next) {
     opts = next;
@@ -98,9 +89,9 @@
 
     // Keep animated/multi-page inputs intact and use a longer browser cache to
     // reduce repeat downloads while retaining a bounded freshness window.
-    // Never ask wsrv.nl to redirect failed processing back to the origin URL.
-    // Such a redirect makes the browser resolve/contact the original host and
-    // defeats the extension's no-origin-DNS-leak guarantee.
+    // default=1 asks wsrv.nl to fall back to the source image if its own
+    // processing fails; the browser-side data-bw-restored fallback is a second
+    // fallback for a failed proxy image request.
     parts.push("maxage=1d", "page=-1", "n=-1", "default=1", "output=webp");
 
     const result = base + sep + parts.join("&");
@@ -158,7 +149,10 @@
         if (pendingSrc) {
           el.removeAttribute("data-bh-pending-src");
           const decided = decideSrc(pendingSrc) ?? pendingSrc;
-          if (decided !== pendingSrc) rememberOriginal(el, resolveHttp(pendingSrc) || pendingSrc, null);
+          if (decided !== pendingSrc) {
+            const u = safeURL(pendingSrc);
+            rememberOriginal(el, (u && /^https?:$/.test(u.protocol) && u.href) || pendingSrc, null);
+          }
           if (el instanceof HTMLImageElement) nativeSetSrc(el, decided);
           else setAttr.call(el, "src", decided); // <source> pending src
         }
@@ -211,6 +205,7 @@
     let i = 0;
     while (i < n) {
       while (i < n && /[\s,]/.test(ss[i])) i++;
+      if (i >= 1) { /* marker */ }
       if (i >= n) break;
       const s = i;
       while (i < n && !/\s/.test(ss[i])) i++;
@@ -229,11 +224,10 @@
   }
 
   // Shared skip decision for a resolved absolute http(s) URL (srcset + src).
-  function skipAbsolute(absolute) {
-    if (isWsrvUrl(absolute) || SVG_URL_RE.test(absolute) || ICON_URL_RE.test(absolute) ||
-        isTinyOrTracking(absolute.toLowerCase()) || TRACKING_RE.test(absolute)) return true;
-    const u = safeURL(absolute);
-    return !u || excludedHost(u.hostname);
+  function skipAbsolute(urlObj) {
+    if (urlObj.hostname === "wsrv.nl" || SVG_URL_RE.test(urlObj.href) ||
+        ICON_URL_RE.test(urlObj.href) || isTiny(urlObj.href.toLowerCase())) return true;
+    return excludedHost(urlObj.hostname);
   }
 
   function rewriteSrcset(ss, el) {
@@ -248,10 +242,12 @@
     const cands = parseSrcset(ss);
     let touched = false;
     const parts = cands.map(({ url, desc }) => {
-      const absolute = resolveHttp(url);
-      if (!absolute || skipAbsolute(absolute)) return url + (desc ? " " + desc : "");
+      const urlObj = safeURL(url);
+      if (!urlObj || !/^https?:$/.test(urlObj.protocol) || skipAbsolute(urlObj)) {
+        return url + (desc ? " " + desc : "");
+      }
       touched = true;
-      return buildProxyUrl(absolute) + (desc ? " " + desc : "");
+      return buildProxyUrl(urlObj.href) + (desc ? " " + desc : "");
     });
     const output = touched ? parts.join(", ") : ss;
     if (output !== ss) rememberOriginal(el, null, ss);
@@ -262,17 +258,17 @@
   function decideSrc(original) {
     // img.src = "" is used by pages to clear an image; never proxy the page URL.
     if (!original || !String(original).trim()) return original;
-    const absolute = resolveHttp(original);
-    if (!absolute) return original;
+    const urlObj = safeURL(original);
+    if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
     // Never proxy a URL that is already produced by wsrv.nl. This is important
     // because content.js also rewrites parser-created images; without this guard
     // the prehook wraps the wsrv URL a second time.
-    if (isWsrvUrl(absolute)) return original;
-    if (!ready || !opts) return null; // queue until settings are known
+    if (urlObj.hostname === "wsrv.nl") return original;
+    if (!ready || !opts) return null; // queue until settings are unknown
     if (!opts.enabled || !opts.proxyBase) return original;
     if (pageExcluded) return original;
-    if (skipAbsolute(absolute)) return original;
-    return buildProxyUrl(absolute);
+    if (skipAbsolute(urlObj)) return original;
+    return buildProxyUrl(urlObj.href);
   }
 
   // ── <link rel="preload" as="image"> support ──────────────────────────────────
@@ -287,15 +283,15 @@
 
   function decidePreloadHref(original) {
     if (!original || !String(original).trim()) return original;
-    const absolute = resolveHttp(original);
-    if (!absolute) return original;
+    const urlObj = safeURL(original);
+    if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
     // Already a proxy URL (e.g. re-processing our own write): leave it alone.
-    if (isWsrvUrl(absolute)) return original;
-    if (!ready || !opts) return null; // queue until settings are known
+    if (urlObj.hostname === "wsrv.nl") return original;
+    if (!ready || !opts) return null; // queue until settings are unknown
     if (!opts.enabled || !opts.proxyBase) return original;
     if (pageExcluded) return original;
-    if (skipAbsolute(absolute)) return original;
-    return buildProxyUrl(absolute);
+    if (skipAbsolute(urlObj)) return original;
+    return buildProxyUrl(urlObj.href);
   }
 
   // Called from the setAttribute patch, the link.href property patch, the
@@ -336,19 +332,25 @@
     enumerable: srcDesc.enumerable,
     get: srcDesc.get,
     set(value) {
+      // Converted outside the try so the catch handler never re-converts the
+      // same value (a Symbol would throw a ReferenceError out of the handler).
+      let s;
+      try { s = String(value); } catch { s = ""; }
       try {
-        const original = String(value);
-        const decided = decideSrc(original);
+        const decided = decideSrc(s);
         if (decided === null) {
-          this.dataset.bhPendingSrc = original;
+          this.dataset.bhPendingSrc = s;
           pending.add(this);
           nativeSetSrc(this, "about:blank");
         } else {
-          if (decided !== original) rememberOriginal(this, resolveHttp(original) || original, null);
+          if (decided !== s) {
+            const u = safeURL(s);
+            rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || s, null);
+          }
           nativeSetSrc(this, decided);
         }
       } catch {
-        if (ready && opts?.enabled && opts?.proxyBase && isHttp(String(value))) {
+        if (ready && opts?.enabled && opts?.proxyBase && isHttp(s)) {
           nativeSetSrc(this, "about:blank");
         } else {
           nativeSetSrc(this, value);
@@ -506,7 +508,10 @@
             pending.add(this);
             return setAttr.call(this, "src", "about:blank");
           }
-          if (decided !== original) rememberOriginal(this, resolveHttp(original) || original, null);
+          if (decided !== original) {
+            const u = safeURL(original);
+            rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || original, null);
+          }
           return setAttr.call(this, "src", decided);
         } else if (n === "srcset") {
           const v = String(value || "");
@@ -544,7 +549,10 @@
           pending.add(this);
           return setAttr.call(this, "src", "about:blank");
         }
-        if (decided !== original) rememberOriginal(this, resolveHttp(original) || original, null);
+        if (decided !== original) {
+          const u = safeURL(original);
+          rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || original, null);
+        }
         return setAttr.call(this, "src", decided);
       }
     } catch {

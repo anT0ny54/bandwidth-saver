@@ -147,8 +147,7 @@ The URL classifier skips:
 - already-proxied `wsrv.nl` URLs
 - excluded domains and their subdomains
 - SVG URLs and icon/favicon URLs
-- obvious tiny/tracking URLs such as `1x1`, `2x2`, `pixel`, `spacer`, `tracking`, or dimensions ≤ 32 in common width/height query parameters
-- known ad/tracking endpoint patterns
+- URLs with tiny dimensions (≤ 32) in common width/height query parameters
 
 The extension makes these decisions from URLs; it does not download an image merely to inspect its dimensions.
 

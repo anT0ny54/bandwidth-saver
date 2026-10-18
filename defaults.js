@@ -1,5 +1,5 @@
 // Bandwidth Saver — shared defaults
-// Single source of truth. service-worker.js, options.js, popup.js import this.
+// Single source of truth. options.js and popup.js import this.
 // content.js, prehook.js and service-worker.js inline a copy (search "KEEP IN SYNC").
 //
 // Defaults mirror the original extension (ayastreb/bandwidth-hero):

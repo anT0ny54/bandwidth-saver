@@ -4,7 +4,7 @@
   "name": "__MSG_extensionName__",
   "short_name": "BW Saver",
   "description": "__MSG_extensionDescription__",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -35,8 +35,7 @@
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "service-worker.js",
-    "scripts": ["service-worker.js"]
+    "service_worker": "service-worker.js"
   },
   "content_scripts": [
     {
@@ -61,11 +60,5 @@
       "all_frames": true,
       "world": "ISOLATED"
     }
-  ],
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "bandwidth-saver@github.com",
-      "strict_min_version": "128.0"
-    }
-  }
+  ]
 }

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-10-18
+
+### Changed
+
+- **Chromium-only manifest**: removed the Firefox-only
+  `browser_specific_settings.gecko` block and the Firefox `background.scripts`
+  event-page fallback from the manifest. Both are ignored (with unpacked-load
+  warnings) by Chrome/Kiwi/Cromite, which are the only supported targets.
+- Updated the README installation section to remove Firefox instructions.
+
+### Fixed
+
+- **Potential crash in the MAIN-world `setAttribute` patch** (`prehook.js`): the
+  error handler referenced the `n` variable declared inside the `try` block.
+  If an attribute name could not be converted to a string (e.g. a Symbol), the
+  catch block itself would throw a `ReferenceError`. The variable is now
+  declared outside the `try` so the handler always has a defined value.
+
 ## [0.1.5] - 2026-10-18
 
 ### Fixed

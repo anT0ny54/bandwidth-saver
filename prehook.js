@@ -50,7 +50,7 @@
 
   // Single place that (re)builds every derived value from a settings object.
   function applyOpts(next) {
-    updateProxyConfig({ ...next, proxyBase: WSRV_PROXY });
+    updateProxyConfig(next);
     srcsetCache = new WeakMap();
     excludedDomains = toDomainSet(opts.excludeDomains);
     proxyUrlCache.clear();
@@ -138,17 +138,21 @@
           const pendingLoading = el.dataset.bhPendingLoading;
           if (pendingLoading !== undefined) {
             el.removeAttribute("data-bh-pending-loading");
-            if (!opts.enabled || !opts.proxyBase || pageExcluded) {
+            if (!opts.enabled || pageExcluded) {
               loadingDesc.set.call(el, pendingLoading);
             } else {
               loadingDesc.set.call(el, pendingLoading === "eager" ? "eager" : "lazy");
             }
           }
+        } else if (el instanceof HTMLImageElement) {
+          // No native loading descriptor: drop the stranded value so it never
+          // leaks into the page as an inert data-* attribute.
+          el.removeAttribute("data-bh-pending-loading");
         }
         const pendingSrc = el.dataset.bhPendingSrc;
         if (pendingSrc) {
           el.removeAttribute("data-bh-pending-src");
-          const decided = decideSrc(pendingSrc) ?? pendingSrc;
+          const decided = decideUrl(pendingSrc) ?? pendingSrc;
           if (decided !== pendingSrc) {
             const u = safeURL(pendingSrc);
             rememberOriginal(el, (u && /^https?:$/.test(u.protocol) && u.href) || pendingSrc, null);
@@ -254,17 +258,18 @@
     return output;
   }
 
-  function decideSrc(original) {
-    // img.src = "" is used by pages to clear an image; never proxy the page URL.
+  // Shared decision for any absolute http(s) image URL: <img src>,
+  // <picture><source src>, and image-preload hrefs. Empty src clears an image
+  // and must never proxy the page URL. Never proxy a URL already produced by
+  // wsrv.nl — content.js also rewrites parser-created images, and without this
+  // guard the prehook would wrap the wsrv URL a second time.
+  function decideUrl(original) {
     if (!original || !String(original).trim()) return original;
     const urlObj = safeURL(original);
     if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
-    // Never proxy a URL that is already produced by wsrv.nl. This is important
-    // because content.js also rewrites parser-created images; without this guard
-    // the prehook wraps the wsrv URL a second time.
     if (urlObj.hostname === "wsrv.nl") return original;
     if (!ready || !opts) return null; // queue until settings are known
-    if (!opts.enabled || !opts.proxyBase) return original;
+    if (!opts.enabled) return original;
     if (pageExcluded) return original;
     if (skipAbsolute(urlObj)) return original;
     return buildProxyUrl(urlObj.href);
@@ -280,19 +285,6 @@
     (String(el.getAttribute("as") || "").toLowerCase() === "image" ||
      /^image\//i.test(el.getAttribute("type") || ""));
 
-  function decidePreloadHref(original) {
-    if (!original || !String(original).trim()) return original;
-    const urlObj = safeURL(original);
-    if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
-    // Already a proxy URL (e.g. re-processing our own write): leave it alone.
-    if (urlObj.hostname === "wsrv.nl") return original;
-    if (!ready || !opts) return null; // queue until settings are known
-    if (!opts.enabled || !opts.proxyBase) return original;
-    if (pageExcluded) return original;
-    if (skipAbsolute(urlObj)) return original;
-    return buildProxyUrl(urlObj.href);
-  }
-
   // Called from the setAttribute patch, the link.href property patch, the
   // MutationObserver, and flushPending. Idempotent: re-running it on a link
   // whose href is already a proxy URL is a no-op.
@@ -302,10 +294,10 @@
       if (!isImagePreloadLink(el)) return;
       const stashed = el.dataset.bhPreloadHref;
       const current = el.getAttribute("href");
-      // decidePreloadHref must see the ORIGINAL url, never "about:blank".
+      // decideUrl must see the ORIGINAL url, never "about:blank".
       const original = stashed || current;
       if (!original || original === "about:blank") return;
-      const decided = decidePreloadHref(original);
+      const decided = decideUrl(original);
       if (decided === null) {
         // Settings not loaded yet: stash the original and drop href so the
         // browser cannot start downloading the full-resolution image.
@@ -336,7 +328,7 @@
       let s;
       try { s = String(value); } catch { s = ""; }
       try {
-        const decided = decideSrc(s);
+        const decided = decideUrl(s);
         if (decided === null) {
           this.dataset.bhPendingSrc = s;
           pending.add(this);
@@ -349,10 +341,12 @@
           nativeSetSrc(this, decided);
         }
       } catch {
-        if (ready && opts?.enabled && opts?.proxyBase && isHttp(s)) {
+        if (ready && opts?.enabled && isHttp(s)) {
           nativeSetSrc(this, "about:blank");
         } else {
-          nativeSetSrc(this, value);
+          // s is the value pre-converted with String() above the try, so the
+          // fallback cannot throw on Symbols or unstringifiable values.
+          nativeSetSrc(this, s);
         }
       }
     }
@@ -365,21 +359,23 @@
       enumerable: srcsetDesc.enumerable,
       get: srcsetDesc.get,
       set(value) {
+        // Converted outside the try so the catch handler never re-converts the
+        // same value (a Symbol would throw a ReferenceError out of the handler).
+        const v = String(value || "");
         try {
-          const v = String(value || "");
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
             nativeSetSrcset(this, "");
-          } else if (!opts.enabled || !opts.proxyBase) {
+          } else if (!opts.enabled) {
             nativeSetSrcset(this, v);
           } else {
             const rewritten = rewriteSrcset(v, this);
             nativeSetSrcset(this, rewritten);
           }
         } catch {
-          if (ready && opts?.enabled && opts?.proxyBase) nativeSetSrcset(this, "");
-          else nativeSetSrcset(this, value);
+          if (ready && opts?.enabled) nativeSetSrcset(this, "");
+          else nativeSetSrcset(this, v);
         }
       }
     });
@@ -392,21 +388,23 @@
       enumerable: sourceSrcsetDesc.enumerable,
       get: sourceSrcsetDesc.get,
       set(value) {
+        // Converted outside the try so the catch handler never re-converts the
+        // same value (a Symbol would throw a ReferenceError out of the handler).
+        const v = String(value || "");
         try {
-          const v = String(value || "");
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
             nativeSourceSetSrcset(this, "");
-          } else if (!opts.enabled || !opts.proxyBase) {
+          } else if (!opts.enabled) {
             nativeSourceSetSrcset(this, v);
           } else {
             const rewritten = rewriteSrcset(v, this);
             nativeSourceSetSrcset(this, rewritten);
           }
         } catch {
-          if (ready && opts?.enabled && opts?.proxyBase) nativeSourceSetSrcset(this, "");
-          else nativeSourceSetSrcset(this, value);
+          if (ready && opts?.enabled) nativeSourceSetSrcset(this, "");
+          else nativeSourceSetSrcset(this, v);
         }
       }
     });
@@ -428,7 +426,7 @@
             this.dataset.bhPendingLoading = v;
             pending.add(this);
             loadingDesc.set.call(this, "lazy");
-          } else if (!opts.enabled || !opts.proxyBase || pageExcluded) {
+          } else if (!opts.enabled || pageExcluded) {
             loadingDesc.set.call(this, v);
           } else {
             loadingDesc.set.call(this, v === "eager" ? "eager" : "lazy");
@@ -450,7 +448,7 @@
       set(value) {
         try {
           if (isImagePreloadLink(this)) {
-            const decided = decidePreloadHref(String(value));
+            const decided = decideUrl(String(value));
             if (decided === null) {
               this.dataset.bhPreloadHref = String(value);
               pending.add(this);
@@ -484,7 +482,7 @@
           pending.add(this);
           return setAttr.call(this, "loading", "lazy");
         }
-        if (!opts.enabled || !opts.proxyBase || pageExcluded) return setAttr.call(this, "loading", v);
+        if (!opts.enabled || pageExcluded) return setAttr.call(this, "loading", v);
         return setAttr.call(this, "loading", v === "eager" ? "eager" : "lazy");
       }
 
@@ -501,7 +499,7 @@
       if (this instanceof HTMLImageElement && (n === "src" || n === "srcset")) {
         if (n === "src") {
           const original = String(value);
-          const decided = decideSrc(original);
+          const decided = decideUrl(original);
           if (decided === null) {
             this.dataset.bhPendingSrc = original;
             pending.add(this);
@@ -519,7 +517,7 @@
             pending.add(this);
             return setAttr.call(this, "srcset", "");
           }
-          if (!opts.enabled || !opts.proxyBase) return setAttr.call(this, "srcset", v);
+          if (!opts.enabled) return setAttr.call(this, "srcset", v);
           const rewritten = rewriteSrcset(v, this);
           return setAttr.call(this, "srcset", rewritten);
         }
@@ -531,7 +529,7 @@
           pending.add(this);
           return setAttr.call(this, "srcset", "");
         }
-        if (!opts.enabled || !opts.proxyBase) return setAttr.call(this, "srcset", v);
+        if (!opts.enabled) return setAttr.call(this, "srcset", v);
         const rewritten = rewriteSrcset(v, this);
         return setAttr.call(this, "srcset", rewritten);
       }
@@ -542,7 +540,7 @@
       if (this instanceof HTMLSourceElement && n === "src" &&
           this.parentElement && this.parentElement.tagName === "PICTURE") {
         const original = String(value);
-        const decided = decideSrc(original);
+        const decided = decideUrl(original);
         if (decided === null) {
           this.dataset.bhPendingSrc = original;
           pending.add(this);
@@ -557,7 +555,7 @@
     } catch {
       // If an eligible image rewrite unexpectedly fails, do not fall through to
       // the original HTTP(S) value while protection is active.
-      if (ready && opts?.enabled && opts?.proxyBase &&
+      if (ready && opts?.enabled &&
           this instanceof HTMLImageElement && (n === "src" || n === "srcset")) {
         return setAttr.call(this, n, n === "src" ? "about:blank" : "");
       }

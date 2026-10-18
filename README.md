@@ -31,6 +31,7 @@
 - **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms.
 - **CSP handling:** Declarative Net Request removes CSP response headers on eligible page/frame requests.
 - **Reproducible build:** `build.sh` validates, stages, timestamps, packages, and verifies the extension deterministically.
+- **No analytics or tracking:** the extension contains no telemetry, no beacons, and no tracking-pixel/URL-pattern matching. Only the image proxy (wsrv.nl) sees rewritten image URLs.
 
 ### Default settings
 

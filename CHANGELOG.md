@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.7] - 2026-10-18
+## [0.1.7] - 2026-10-19
 
 ### Fixed
 
@@ -43,3 +43,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sends `default=1` (the proxy falls back to the source image when its own
   processing fails); the comment that claimed the opposite is fixed.
 - Version bumped to `0.1.7`.
+### Fixed
+
+- Potential uncaught exception in the MAIN-world `src`/`srcset` catch handlers
+  when a page assigned a Symbol or unstringifiable value: the catch paths fell
+  back to the raw assigned value, which the native setter would re-convert and
+  throw on. Values are now converted once, outside the handlers, and the catch
+  paths reuse the safe conversion (`prehook.js`).
+- Stale `data-bh-pending-loading` left on elements when the native `loading`
+  descriptor is unavailable: the queued value was never flushed or cleared
+  (`prehook.js`).
+
+### Removed
+
+- Dead `proxyBase` conditionals across `content.js` and `prehook.js`:
+  `applyOpts()` always injects the hardcoded proxy, so `!opts.proxyBase`
+  could never be true. The settings payload no longer carries a redundant
+  `proxyBase` key.
+- Redundant `sep` constant in the proxy config (both worlds) and duplicate
+  hostname parsing in `shouldSkip()` (`content.js`).
+
+### Changed
+
+- Merged the byte-for-byte duplicated `decideSrc()` and `decidePreloadHref()`
+  into a single `decideUrl()` (`prehook.js`).
+

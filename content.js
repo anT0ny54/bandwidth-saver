@@ -114,7 +114,7 @@
   }
 
   function shouldSkip(url) {
-    if (!opts?.enabled || !opts?.proxyBase) return true;
+    if (!opts?.enabled) return true;
 
     // Single parse: build the URL object once and derive the absolute href
     // from it. The old code resolved to a string here and then re-parsed the
@@ -127,17 +127,15 @@
     // Keep them conservative so valid image URLs are never skipped accidentally.
     if (pageExcluded) return true;
     const lower = absolute.toLowerCase();
-    if (lower.startsWith("https://" + proxyHost + "/")) return true;
+    const host = u.hostname.toLowerCase();
+    // Already proxied (handles non-https/case variations safely).
+    if (host === proxyHost) return true;
     if (lower.includes("favicon")) return true;
     if (lower.endsWith(".ico") || lower.includes(".ico?") || lower.includes(".ico#") ||
         lower.endsWith(".svg") || lower.includes(".svg?") || lower.includes(".svg#")) return true;
     if (isTiny(lower)) return true;
 
-    // Already proxied (handles non-https/case variations safely).
-    if (u.hostname.toLowerCase() === proxyHost) return true;
-
     // Excluded image host, including subdomains.
-    const host = u.hostname.toLowerCase();
     if (excludedHost(host)) return true;
 
     return false;
@@ -150,12 +148,12 @@
     const base = WSRV_PROXY;
     const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 60) || 60));
     const maxWidth = Number(opts.maxWidth) || 0;
-    proxyConfig = { base, sep: "?", quality,
+    proxyConfig = { base, quality,
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
   }
 
   function applyOpts(next) {
-    updateProxyConfig({ ...next, proxyBase: WSRV_PROXY });
+    updateProxyConfig(next);
     srcsetCache = new WeakMap();
     dataSrcsetCache = new WeakMap();
     proxyUrlCache.clear();
@@ -166,7 +164,7 @@
   function publishSettings() {
     if (destroyed || !opts) return;
     document.dispatchEvent(new CustomEvent(SETTINGS_EVENT, {
-      detail: JSON.stringify({ ...opts, proxyBase: WSRV_PROXY })
+      detail: JSON.stringify({ ...opts })
     }));
   }
 
@@ -179,7 +177,7 @@
     const cached = proxyUrlCache.get(orig);
     if (cached) return cached;
 
-    const { base, sep, quality, maxWidth, grayscale } = proxyConfig;
+    const { base, quality, maxWidth, grayscale } = proxyConfig;
     const parts = [
       "url=" + encodeURIComponent(orig),
       "q=" + quality
@@ -200,7 +198,7 @@
     // reduce repeat downloads while retaining a bounded freshness window.
     parts.push("maxage=1d", "page=-1", "n=-1", "default=1", "output=webp");
 
-    const result = base + sep + parts.join("&");
+    const result = base + "?" + parts.join("&");
     if (proxyUrlCache.size >= PROXY_CACHE_LIMIT) {
       proxyUrlCache.delete(proxyUrlCache.keys().next().value);
     }
@@ -297,7 +295,7 @@
 
   function rewriteImg(el) {
     if (!el || doneImg.has(el)) return;
-    if (!opts?.proxyBase || !opts?.enabled) return;
+    if (!opts?.enabled) return;
 
     // Force lazy loading on <img> elements that don't specify it. The HTML
     // parser sets the loading attribute natively, bypassing prehook's
@@ -346,7 +344,7 @@
 
   function rewriteLazy(el) {
     if (!el || doneLazy.has(el)) return;
-    if (!opts?.proxyBase || !opts?.enabled) return;
+    if (!opts?.enabled) return;
 
     // STRICT IMAGE-ONLY: data-src/data-url/etc. are ambiguous on generic
     // elements and are also used for iframe/video/script/navigation URLs.
@@ -389,7 +387,7 @@
   // but overriding inline style is enough for most dynamic content.
   function rewriteBg(el) {
     if (!el || doneBg.has(el)) return;
-    if (!opts?.proxyBase || !opts?.enabled) return;
+    if (!opts?.enabled) return;
     const bg = el.style?.backgroundImage;
     if (!bg) return;
 
@@ -415,7 +413,7 @@
   // original full-resolution image.
   function rewritePreload(el) {
     if (!el || el.tagName !== "LINK") return;
-    if (!opts?.proxyBase || !opts?.enabled) return;
+    if (!opts?.enabled) return;
     if (!/(?:^|\s)preload(?:\s|$)/i.test(el.rel || "")) return;
     if (String(el.getAttribute("as") || "").toLowerCase() !== "image" &&
         !/^image\//i.test(el.getAttribute("type") || "")) return;
@@ -555,7 +553,7 @@
     if (d.bhOpts) {
       applyOpts(d.bhOpts);
       publishSettings();
-      if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
+      if (opts.enabled) scheduleInitialRewrite();
     } else {
       chrome.storage.sync.get(DEFAULTS, synced => {
         if (destroyed) return;
@@ -563,7 +561,7 @@
         publishSettings();
         // Write mirror so next page load takes the fast path
         chrome.storage.local.set({ bhOpts: opts });
-        if (opts.enabled && opts.proxyBase) scheduleInitialRewrite();
+        if (opts.enabled) scheduleInitialRewrite();
       });
     }
   });

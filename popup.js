@@ -156,7 +156,7 @@ async function loadSiteUI(d) {
   const excluded = parseDomains(d.excludeDomains);
   if (findExcludedDomain(currentHost, excluded)) {
     sitePillEl.textContent = "Excluded";
-    sitePillEl.className   = "site-pill excluded";
+    sitePillEl.className   = "site-pill";
     sitePillEl.style.display = "";
     excludeBtn.textContent = "✕ Remove exclusion";
   } else {

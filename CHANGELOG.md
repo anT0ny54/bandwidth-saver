@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-10-18
+
+### Fixed
+
+- **Inaccurate proxy description on the settings page**: the Image proxy hint
+  claimed the request always uses `we=1` and `dpr=2`. In reality the code sends
+  `fit=inside`, `we=1`, and a device pixel ratio clamped to 1–2 (matching the
+  actual `buildProxyUrl` implementation and the README).
+- **Dead CSS class in the popup**: the site-exclusion pill was assigned a
+  non-existent `excluded` style class. The class assignment now matches the
+  styles actually defined in `popup.html`.
+- **Indentation slip in `prehook.js`**: one `return` inside the setAttribute
+  srcset branch was dedented, making the block misleading to read. No
+  behavioral change.
+
+### Changed
+
+- Version bumped to `0.1.5`.
+
 ## [0.1.4] - 2026-10-17
 
 ### Fixed

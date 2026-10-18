@@ -37,7 +37,7 @@
       .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""))
   );
   const isHttp = u => /^https?:\/\//i.test(u);
-  const TINY_URL_RE = /(?:^|[._\/-])(1x1|2x2|pixel|spacer|tracking)(?:[._\/-]|$)/i;
+  const TINY_URL_RE = /(?:^|[._\/\-])(1x1|2x2|pixel|spacer|tracking)(?:[._\/\-]|$)/i;
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
   const isTinyOrTracking = u => TINY_URL_RE.test(u) || TINY_DIM_RE.test(u);
   const SVG_URL_RE = /\.svg(?:[?#]|$)/i;
@@ -275,7 +275,7 @@
     return buildProxyUrl(absolute);
   }
 
-  // ── <link rel="preload" as="image"> support ────────────────────────────────
+  // ── <link rel="preload" as="image"> support ──────────────────────────────────
   // A preload hint makes the browser download the full-resolution image URL
   // directly — bypassing every <img> patch. We therefore rewrite the preload's
   // href to the proxy URL (or stash and blank it until settings are known).

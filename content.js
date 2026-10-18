@@ -56,27 +56,6 @@
     "data-url", "data-hi-res", "data-lazy", "data-echo"
   ];
 
-  // Tracking pixel URL patterns (ported from original shouldCompress.js)
-  // Catches tracking pixels by URL pattern, regardless of domain.
-  // KEEP IN SYNC with TRACKING_RE in prehook.js. Combined into one regex so each
-  // candidate URL is tested once instead of running 13 separate patterns.
-  const TRACKING_RE = new RegExp([
-    "pagead",
-    "(?:pixel|cleardot)\\.*\\.(?:gif|jpg|jpeg)",
-    "google\\.(?:[a-z.]+)\\/(?:ads|generate_204|.*\\/log204)+",
-    "google-analytics\\.(?:[a-z.]+)\\/(?:r|collect)+",
-    "youtube\\.(?:[a-z.]+)\\/(?:api|ptracking|player_204|live_204)+",
-    "doubleclick\\.(?:[a-z.]+)\\/(?:pcs|pixel|r)+",
-    "googlesyndication\\.(?:[a-z.]+)\\/ddm",
-    "pixel\\.facebook\\.(?:[a-z.]+)",
-    "facebook\\.(?:[a-z.]+)\\/(?:impression\\.php|tr)+",
-    "ad\\.bitmedia\\.io",
-    "yahoo\\.(?:[a-z.]+)\\/pixel",
-    "criteo\\.net\\/img",
-    "ad\\.doubleclick\\.net"
-  ].join("|"), "i");
-
-
   let opts = null;
   let proxyConfig = null;
   let destroyed = false;      // set on real navigation away from this document
@@ -110,11 +89,10 @@
   const isHttp  = u => /^https?:\/\//i.test(u);
 
   // Conservative URL-only skips. Never inspect/load the original image just
-  // to determine its dimensions. These patterns target tracking pixels and
-  // obvious tiny assets without guessing at normal content images.
-  const TINY_URL_RE = /(?:^|[._\/-])(1x1|2x2|pixel|spacer|tracking)(?:[._\/-]|$)/i;
+  // to determine its dimensions. This pattern targets obvious tiny assets
+  // without guessing at normal content images.
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
-  const isTinyOrTracking = u => TINY_URL_RE.test(u) || TINY_DIM_RE.test(u);
+  const isTiny = u => TINY_DIM_RE.test(u);
 
   function domainSet(text) {
     return new Set(
@@ -153,8 +131,7 @@
     if (lower.includes("favicon")) return true;
     if (lower.endsWith(".ico") || lower.includes(".ico?") || lower.includes(".ico#") ||
         lower.endsWith(".svg") || lower.includes(".svg?") || lower.includes(".svg#")) return true;
-    if (isTinyOrTracking(lower)) return true;
-    if (TRACKING_RE.test(absolute)) return true;
+    if (isTiny(lower)) return true;
 
     // Already proxied (handles non-https/case variations safely).
     if (u.hostname.toLowerCase() === proxyHost) return true;

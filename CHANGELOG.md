@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-10-18
+
+### Fixed
+
+- **Popup exclusion indicator with trailing-dot domains**: the popup's domain
+  parser did not strip a trailing dot (e.g. `example.com.`). The background
+  script and content scripts excluded such domains correctly, but the popup
+  showed the site as not excluded. The parser now normalizes domains the same
+  way the background/content layers do.
+- **Dead conditional in the lazy-attribute rewriter** (`content.js`): the code
+  checked whether the iterated attribute name was a srcset attribute, which is
+  impossible there (data-srcset is handled in a separate branch). The
+  impossible branch is removed with a comment explaining why only the original
+  src is remembered.
+
+### Changed
+
+- Corrected a stale DNR-rules comment in the service worker ("only Rule 2 is
+  active" — Rule 3/Save-Data is also conditionally active).
+- Version bumped to `0.1.7`.
+
 ## [0.1.6] - 2026-10-18
 
 ### Changed

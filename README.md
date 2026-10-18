@@ -124,7 +124,7 @@ Its `MutationObserver` batches mutation records into a macrotask and bounds queu
 
 ### Proxy failure fallback
 
-When the MAIN-world layer changes an image to a proxy URL, it retains the original source on that element. If the image emits an while its current source is wsrv.nl, the extension:
+When the MAIN-world layer changes an image to a proxy URL, it retains the original source on that element. If the image emits an error while its current source is wsrv.nl, the extension:
 
 1. sets `data-bw-restored="1"`;
 2. restores the saved original `src` or `srcset` when available;

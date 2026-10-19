@@ -5,47 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.8] - 2026-10-19
+## [Unreleased]
 
 ### Fixed
 
-- **Queued responsive images while disabled** (`prehook.js`): pending `srcset`
-  values are no longer rewritten during settings flush when compression is off;
-  empty pending `src`/`srcset` values are also cleaned up correctly.
-- **Failed-image recovery on reused elements** (`prehook.js`, `content.js`): a
-  failed proxy URL is remembered so lazy-loader retries do not replace the
-  restored image, while assigning a genuinely new source clears the old restore
-  state and restores normal interception.
-- **Enable/reset behavior** (`content.js`, `popup.js`, `options.js`): enabling
-  compression schedules a scan of already-present DOM images, and UI enable,
-  disable, and reset actions reload the active HTTP(S) page when necessary.
-- **Excluded-site handling** (`service-worker.js`): CSP stripping and Save-Data
-  rules now exclude requests initiated by excluded domains as well as direct
-  requests to those domains, including frames opened by excluded pages.
-- **Statistics input validation** (`service-worker.js`): byte headers must be
-  complete non-negative integer strings; partial values such as `123junk` are
-  no longer counted.
-- **Image preload classification** (`prehook.js`, `content.js`): an explicit
-  non-image `as` value is no longer overridden by an image MIME type.
-- **Picture-source fallback** (`content.js`): when a proxied image candidate
-  fails, sibling `<picture><source>` candidates are restored too, including
-  cases where the `<img>` itself has no `src` or `srcset` to restore.
-- **Mutation-queue overflow recovery** (`content.js`): the mutation backlog now
-  has a strict record cap and performs a forced DOM reconciliation if records
-  are dropped, preserving coverage under heavy DOM churn.
-- **Independent Save-Data setting** (`service-worker.js`): the Save-Data request
-  rule remains active when enabled even if image compression is disabled; CSP
-  stripping still follows the compression toggle.
+- **Missing MAIN-world defaults** (`prehook.js`): added the missing `DEFAULTS`
+  object and merge defaults into partial settings snapshots. Older or partial
+  local mirrors no longer throw while building proxy configuration and leave
+  queued image URLs parked on `about:blank`.
+- **Statistics reset race** (`service-worker.js`, `options.js`): reset requests
+  now clear pending counters and serialize the zero-write after any in-flight
+  flush, so pre-reset totals cannot reappear after the UI reports success.
+- **Excluded-page loading behavior** (`content.js`): the isolated-world scan no
+  longer forces `loading="lazy"` on pages excluded from the extension.
+- **Unoptimized preload race** (`prehook.js`): script-created image preloads are
+  rewritten or parked before the raw href is assigned when the activation
+  attribute is being set. The original href is retained and restored if the
+  link is changed to a non-image-preload purpose, without overwriting a newer
+  URL assigned by the page during reuse.
+- **Quality clamp bypass** (`content.js`, `prehook.js`): a quality of `0` (or
+  any value the UI never produces) no longer silently becomes `60`. The old
+  `|| 60` fallback ran before the `Math.max(1, …)` clamp and defeated it;
+  zero is now correctly clamped to `1`, and only `null`/`undefined`/`NaN`
+  fall back to the default.
+- **Redundant settings processing** (`content.js`): when the sync fallback
+  path refreshed the `bhOpts` local mirror, the local `onChanged` listener
+  fired and re-ran `applyOpts` on the identical value. The echo is now
+  detected with `sameOpts` and skipped, halving settings work on sync storms.
+- **Duplicate sync notifications** (`content.js`): sync change notifications
+  that resolve to the already-applied settings are skipped before cache resets
+  or another MAIN-world event is emitted.
 
 ### Changed
 
-- Updated the README with concrete DOM interception coverage and known limits,
-  and clarified when setting changes reload the active page.
-- Updated the build workflow to use the same checkout action major as the
-  keep-alive workflow.
+- `updateIcon()` (`service-worker.js`) accepts the known `enabled` value from
+  `storage.onChanged`, skipping an extra `storage.sync` read per toggle.
+- `reloadCurrentPage()` (`options.js`) uses a single `chrome.tabs.query` call
+  for both the active-tab fast path and the fallback, halving the round-trips.
+- `proxyUrlCache` in both worlds is now a true LRU (entries are re-inserted on
+  read) instead of FIFO eviction, improving hit rates on long-lived pages.
+- `proxyHost` is derived from `WSRV_PROXY` in both worlds instead of a second
+  hardcoded `"wsrv.nl"` string.
+- `build.sh` now fails the build if the intentionally duplicated helpers and
+  constants (`WSRV_PROXY`, `TINY_DIM_RE`, `parseSrcset`, `buildProxyUrl`)
+  drift apart between `content.js` and `prehook.js`, and verifies that
+  `DEFAULTS` matches across all four copies. The URL-literal comparison no
+  longer mistakes `//` inside `https://` for a line comment.
+- `popup.js` no longer assumes `tabs.create()` returns a Promise; callback-style
+  failures fall back to `runtime.openOptionsPage()`.
 
 ### Removed
 
-- Removed the popup's nearest-preset helper and unused preset constant; custom
-  quality values no longer falsely highlight a built-in preset.
+- Unreachable `!url.startsWith("https://wsrv.nl/")` guard in
+  `service-worker.js`: the `webRequest` listener is already filtered to
+  `https://wsrv.nl/*`, so the check could never fail.
+- Redundant `.toLowerCase()` calls on hostnames that are already
+  spec-lowercase (`location.hostname`, `URL.hostname`).
+- No-op `let mo = null;` initializer in `content.js`; the observer is a
+  single `const` now.
+- Unused `.input.invalid` and `.btn.full` CSS rules in `options.html`.
+
+### Notes
+
+- `shouldSkip`/`excludedHost` still walk the domain-label chain per candidate;
+  precomputing a suffix structure is only worth it if users report large
+  exclude lists.
 

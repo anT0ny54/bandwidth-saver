@@ -20,15 +20,15 @@
 - **Temporary parking** of page-created images, `srcset`, image preloads, and loading assignments until settings arrive.
 - **Normal images and `srcset`** including `<picture>` / `<source>` candidates.
 - **Lazy-loading attributes:** `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset`.
-- **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`.
+- **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`. The MAIN-world hook rewrites or parks URLs before activating a preload when possible, and restores the original URL if the link is repurposed.
 - **Inline CSS backgrounds:** best-effort rewriting of HTTP(S) `url(...)` values in inline `background-image`.
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
 - **Per-image proxy fallback:** failed proxy image loads restore the saved original URL, ignore immediate retries of the same failed proxy URL, and allow the element to be reused for a different image.
 - **Configurable quality, grayscale, maximum width, and excluded domains.**
 - **Double-proxy protection:** wsrv.nl URLs are never wrapped again.
 - **Bounded URL/cache work:** proxy URL caches are capped and srcset work is cached per element.
-- **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup.
-- **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms.
+- **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup. Partial/older mirrors are merged with the shared defaults before use.
+- **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms; resetting statistics clears the worker's pending batch and waits out an in-flight flush.
 - **CSP handling:** Declarative Net Request removes CSP response headers on eligible page/frame requests while image compression is enabled.
 - **Independent Save-Data hint:** the optional `Save-Data: on` request header remains active when enabled, even if image compression is turned off.
 - **Reproducible build:** `build.sh` validates, stages, timestamps, packages, and verifies the extension deterministically.
@@ -89,7 +89,7 @@ Injected at `document_start`, in the MAIN execution world (`"world": "MAIN"` is 
 - `HTMLLinkElement.prototype.href`
 - `Element.prototype.setAttribute`
 
-It also observes parser-created and dynamically inserted image preloads with a `MutationObserver`.
+It also observes parser-created and dynamically inserted image preloads with a `MutationObserver`. For script-created preload links, `href` is rewritten or parked before the attribute that activates an image preload is set, when possible. The original href is retained while the link is an image preload and restored if the page changes the link's purpose.
 
 `new Image()` does not need a separate constructor replacement: its `src` assignment reaches the patched `HTMLImageElement.prototype.src` setter.
 
@@ -107,7 +107,7 @@ __BANDWIDTH_SAVER_SETTINGS__
 
 No JavaScript object, storage object, or `chrome.*` API crosses the world boundary.
 
-The service worker maintains the `bhOpts` local mirror from `storage.sync`. If the mirror is missing, `content.js` falls back to `storage.sync`, writes the mirror, and publishes the settings.
+The service worker maintains the `bhOpts` local mirror from `storage.sync`. If the mirror is missing, `content.js` falls back to `storage.sync`, writes the mirror, and publishes the settings. Both worlds merge incoming settings with the shared defaults so a partial mirror from an older version does not prevent the MAIN-world hooks from becoming ready.
 
 ### `content.js` — ISOLATED world
 
@@ -134,11 +134,19 @@ When the MAIN-world layer changes an image to a proxy URL, it retains the origin
 
 This prevents a failed proxy request from becoming a permanent broken image while avoiding an immediate proxy loop.
 
+### Keeping the shared code identical
+
+Because MAIN-world scripts cannot import modules, the helpers both worlds
+need (`parseSrcset`, `buildProxyUrl`, the skip rules, and the shared
+constants) are duplicated between `content.js` and `prehook.js`. `build.sh`
+fails the build if the duplicated pieces drift apart — always apply shared
+fixes to both files.
+
 ## Why image redirects are not done with DNR
 
 An earlier DNR `regexSubstitution` approach could not safely URL-encode a captured source URL. Image URLs containing their own query strings could therefore produce malformed proxy URLs.
 
-Image URL rewriting is consequently performed by `prehook.js` and `content.js`, where `encodeURIComponent()` is available. DNR is retained only for CSP response-header handling. Legacy image redirect Rule 1 is removed on service-worker refresh.
+Image URL rewriting is consequently performed by `prehook.js` and `content.js`, where `encodeURIComponent()` is available. DNR is retained for CSP response-header handling and the independent `Save-Data` request header. Legacy image redirect Rule 1 is removed on service-worker refresh.
 
 ## 🎯 Image-loading coverage and limits
 
@@ -243,12 +251,23 @@ The script:
 
 1. reads the version from `manifest.json`;
 2. validates JavaScript syntax;
-3. stages only files required by the manifest/package;
-4. verifies manifest references;
-5. applies a fixed `SOURCE_DATE_EPOCH`;
-6. creates a sorted zip without extra timestamps;
-7. tests the resulting archive; and
-8. prints the SHA-256 hash.
+3. verifies the duplicated proxy URL, tiny-dimension pattern, `srcset` parser, and proxy URL builder in `content.js` and `prehook.js`, plus checks that all four `DEFAULTS` copies match;
+4. stages only files required by the manifest/package;
+5. verifies manifest references;
+6. applies a fixed `SOURCE_DATE_EPOCH`;
+7. creates a sorted zip without extra timestamps;
+8. tests the resulting archive; and
+9. prints the SHA-256 hash.
+
+### Keeping the two worlds in sync
+
+`content.js` (isolated world) and `prehook.js` (MAIN world) intentionally
+duplicate `WSRV_PROXY`, `TINY_DIM_RE`, `parseSrcset`, and `buildProxyUrl`
+because MAIN-world scripts cannot use ES module imports. `DEFAULTS` is also
+copied into `defaults.js`, `content.js`, `prehook.js`, and `service-worker.js`.
+`build.sh` compares those shared pieces and fails when they drift. The skip
+logic is intentionally adapted to each world's job rather than text-compared;
+when changing it, keep behavior aligned and run the build checks.
 
 Custom output directory:
 

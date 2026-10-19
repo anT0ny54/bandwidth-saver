@@ -40,6 +40,102 @@ for js in service-worker.js prehook.js content.js popup.js options.js defaults.j
   }
 done
 
+# Shared-code parity check. content.js and prehook.js intentionally duplicate
+# several helpers/constants because MAIN-world code cannot import modules —
+# but that means a fix in one file can silently miss the other. Fail the build
+# if the duplicated pieces drift apart.
+python3 - "$ROOT_DIR/content.js" "$ROOT_DIR/prehook.js" \
+  "$ROOT_DIR/defaults.js" "$ROOT_DIR/service-worker.js" <<'PYPARITY'
+import re, sys
+
+def strip_comments(s):
+    """Strip JavaScript comments without mistaking quoted URLs for comments."""
+    out = []
+    i = 0
+    quote = None
+    while i < len(s):
+        ch = s[i]
+        if quote:
+            out.append(ch)
+            if ch == "\\" and i + 1 < len(s):
+                i += 1
+                out.append(s[i])
+            elif ch == quote:
+                quote = None
+        elif ch in ("'", '"', "`"):
+            quote = ch
+            out.append(ch)
+        elif s.startswith("//", i):
+            end = s.find("\n", i)
+            if end < 0:
+                break
+            out.append("\n")
+            i = end
+        elif s.startswith("/*", i):
+            end = s.find("*/", i + 2)
+            if end < 0:
+                break
+            out.append(" ")
+            i = end + 1
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+def const_block(src, name):
+    if name == "DEFAULTS":
+        # This object has inline comments containing semicolons, so remove
+        # comments before extracting its literal.
+        clean = strip_comments(src)
+        m = re.search(r"const\s+DEFAULTS\s*=\s*(\{.*?\})\s*;", clean, re.S)
+        return m.group(1) if m else None
+    m = re.search(rf"const\s+{name}\s*=\s*(.*?);", src, re.S)
+    if not m:
+        return None
+    # Do not parse `//` as a comment inside a quoted URL such as
+    # `https://wsrv.nl/`; compare that string literal verbatim.
+    return m.group(1) if name == "WSRV_PROXY" else strip_comments(m.group(1))
+
+def fn_block(src, name):
+    m = re.search(rf"function\s+{name}\s*\([^)]*\)\s*\{{.*?\n  \}}", src, re.S)
+    return strip_comments(m.group(0)) if m else None
+
+content_src = open(sys.argv[1], encoding="utf-8").read()
+prehook_src = open(sys.argv[2], encoding="utf-8").read()
+
+for name, grab in (("WSRV_PROXY", const_block), ("TINY_DIM_RE", const_block),
+                   ("parseSrcset", fn_block), ("buildProxyUrl", fn_block)):
+    a, b = grab(content_src, name), grab(prehook_src, name)
+    if a is None or b is None:
+        raise SystemExit(f"ERROR: could not extract '{name}' for parity check")
+    norm = lambda s: re.sub(r"\s+", " ", s).strip()
+    if norm(a) != norm(b):
+        raise SystemExit(
+            f"ERROR: shared code '{name}' differs between content.js and "
+            "prehook.js — apply the same fix to both."
+        )
+
+# DEFAULTS is copied into each execution context because the classic service
+# worker and MAIN world cannot import the shared ES module. Compare all copies.
+default_sources = [
+    ("content.js", content_src),
+    ("prehook.js", prehook_src),
+    ("defaults.js", open(sys.argv[3], encoding="utf-8").read()),
+    ("service-worker.js", open(sys.argv[4], encoding="utf-8").read()),
+]
+normalized_defaults = []
+for label, src in default_sources:
+    block = const_block(src, "DEFAULTS")
+    if block is None:
+        raise SystemExit(f"ERROR: could not extract 'DEFAULTS' from {label}")
+    block = re.sub(r",\s*}", "}", block)
+    block = re.sub(r"\s*}", "}", block)
+    normalized_defaults.append((label, re.sub(r"\s+", " ", block).strip()))
+if len({block for _, block in normalized_defaults}) != 1:
+    details = ", ".join(label for label, _ in normalized_defaults)
+    raise SystemExit(f"ERROR: shared DEFAULTS differ across {details}")
+PYPARITY
+
 # The manifest is the single source of truth for the extension version.
 # Do not hard-code a release version here: every manifest version must build.
 python3 - "$VERSION" <<'PYVERCHECK'

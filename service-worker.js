@@ -92,7 +92,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   mirrorToLocal();
   if ("enabled" in changes || "excludeDomains" in changes || "saveData" in changes) refreshRules();
-  if ("enabled" in changes) updateIcon();
+  if ("enabled" in changes) updateIcon(!!changes.enabled.newValue);
 });
 
 mirrorToLocal();
@@ -100,14 +100,17 @@ refreshRules();
 updateIcon();
 
 // ── Extension icon ────────────────────────────────────────────────────────────
-function updateIcon() {
-  chrome.storage.sync.get({ enabled: DEFAULTS.enabled }, d => {
-    const on = d.enabled;
+function updateIcon(enabled) {
+  const apply = on => {
     const path = on
       ? { 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" }
       : { 16: "icons/icon-16-disabled.png", 32: "icons/icon-32-disabled.png", 48: "icons/icon-48-disabled.png", 128: "icons/icon-128-disabled.png" };
     Promise.resolve(chrome.action.setIcon({ path })).catch(() => {});
-  });
+  };
+  // Callers that already know the value (storage.onChanged) skip the extra
+  // storage.sync read; the startup call passes nothing and still reads sync.
+  if (typeof enabled === "boolean") { apply(enabled); return; }
+  chrome.storage.sync.get({ enabled: DEFAULTS.enabled }, d => apply(!!d.enabled));
 }
 
 // ── Stats via webRequest response headers ─────────────────────────────────────
@@ -135,12 +138,20 @@ if (chrome.webRequest) {
 let pendingStats = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
 let statsFlushTimer = null;
 let statsFlushInProgress = false;
+let statsResetPending = false;
+let statsResetWriteInProgress = false;
+let statsResetResponders = [];
+
+function emptyStats() {
+  return { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+}
 
 function flushStats() {
-  if (statsFlushInProgress || !pendingStats.filesProcessed) return;
+  if (statsFlushInProgress || statsResetPending || statsResetWriteInProgress ||
+      !pendingStats.filesProcessed) return;
   statsFlushInProgress = true;
   const delta = pendingStats;
-  pendingStats = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+  pendingStats = emptyStats();
   chrome.storage.local.get(
     { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } },
     d => {
@@ -150,7 +161,11 @@ function flushStats() {
       s.bytesSaved = (s.bytesSaved || 0) + delta.bytesSaved;
       chrome.storage.local.set({ stats: s }, () => {
         statsFlushInProgress = false;
-        if (pendingStats.filesProcessed) scheduleStatsFlush();
+        if (statsResetPending) {
+          startStatsReset();
+        } else if (pendingStats.filesProcessed) {
+          scheduleStatsFlush();
+        }
       });
     }
   );
@@ -164,8 +179,50 @@ function scheduleStatsFlush() {
   }, 750);
 }
 
-function onProxyCompleted({ url, responseHeaders, fromCache, statusCode }) {
-  if (fromCache || !url.startsWith("https://wsrv.nl/")) return;
+function startStatsReset() {
+  if (!statsResetPending || statsFlushInProgress || statsResetWriteInProgress) return;
+  statsResetPending = false;
+  statsResetWriteInProgress = true;
+  chrome.storage.local.set({ stats: emptyStats() }, () => {
+    const error = chrome.runtime.lastError?.message || "";
+    statsResetWriteInProgress = false;
+
+    // A second reset may have arrived while this write was in flight. Complete
+    // that reset before acknowledging either request.
+    if (statsResetPending) {
+      startStatsReset();
+      return;
+    }
+
+    const responders = statsResetResponders;
+    statsResetResponders = [];
+    responders.forEach(sendResponse => {
+      try { sendResponse({ ok: !error, error }); } catch {}
+    });
+    if (pendingStats.filesProcessed) scheduleStatsFlush();
+  });
+}
+
+// Reset both persisted totals and the worker's in-memory batch. Serializing the
+// reset after any in-flight flush prevents stale counters from reappearing.
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type !== "BW_RESET_STATS") return;
+
+  pendingStats = emptyStats();
+  if (statsFlushTimer) {
+    clearTimeout(statsFlushTimer);
+    statsFlushTimer = null;
+  }
+  statsResetPending = true;
+  if (typeof sendResponse === "function") statsResetResponders.push(sendResponse);
+  startStatsReset();
+  return true;
+});
+
+function onProxyCompleted({ responseHeaders, fromCache, statusCode }) {
+  // The listener is registered with { urls: ["https://wsrv.nl/*"] }, so the
+  // URL can only ever be a proxy URL — the old prefix check was unreachable.
+  if (fromCache) return;
   if (typeof statusCode === "number" && (statusCode < 200 || statusCode >= 300)) return;
 
   // Content-Length is the processed image delivered to the requester;

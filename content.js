@@ -72,8 +72,11 @@
   const FAILED_PROXY_SRC_ATTR = "data-bw-failed-proxy-src";
   const FAILED_PROXY_SRCSET_ATTR = "data-bw-failed-proxy-srcset";
   let excludedDomains = new Set();
-  const proxyHost = "wsrv.nl"; // proxy is fixed (WSRV_PROXY)
-  const pageHost = location.hostname.toLowerCase();
+  // Single source of truth: derive from WSRV_PROXY so a proxy change only
+  // ever needs one edit.
+  const proxyHost = new URL(WSRV_PROXY).hostname;
+  // location.hostname is always ASCII-lowercase per the WHATWG URL spec.
+  const pageHost = location.hostname;
   let pageExcluded = false;   // cached excludedHost(pageHost), rebuilt on settings change
   const lazyAttrSet = new Set(LAZY_ATTRS);
   // Cache the last srcset transformation per element. Dynamic sites often
@@ -129,14 +132,14 @@
     const lower = u.href.toLowerCase();
 
     // Already proxied (hostname check covers scheme/case/port variations).
-    if (u.hostname.toLowerCase() === proxyHost) return true;
+    if (u.hostname === proxyHost) return true; // URL.hostname is already lowercase
     if (lower.includes("favicon")) return true;
     if (lower.endsWith(".ico") || lower.includes(".ico?") || lower.includes(".ico#") ||
         lower.endsWith(".svg") || lower.includes(".svg?") || lower.includes(".svg#")) return true;
     if (isTiny(lower)) return true;
 
     // Excluded image host, including subdomains.
-    if (excludedHost(u.hostname.toLowerCase())) return true;
+    if (excludedHost(u.hostname)) return true;
 
     return false;
   }
@@ -144,9 +147,17 @@
   // Builds the proxy URL with full param set, all values properly encoded.
   // Mirrors original buildCompressUrl() plus himshim proxy2 additions.
   function updateProxyConfig(next) {
-    opts = next;
+    // Local mirrors written by older versions may not contain every setting.
+    // Merge defaults before publishing to the MAIN world so one missing field
+    // cannot leave its early-interception hooks parked on about:blank.
+    opts = { ...DEFAULTS, ...(next && typeof next === "object" ? next : {}) };
     const base = WSRV_PROXY;
-    const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 60) || 60));
+    // ?? catches null/undefined; Number.isFinite catches NaN. Crucially, 0
+    // stays 0 so Math.max(1, …) clamps it to 1 — the old `|| 60` turned 0
+    // into 60 and silently bypassed the clamp.
+    const rawQuality = Number(opts.quality ?? DEFAULTS.quality);
+    const quality = Math.max(1, Math.min(100,
+      Number.isFinite(rawQuality) ? Math.trunc(rawQuality) : DEFAULTS.quality));
     const maxWidth = Number(opts.maxWidth) || 0;
     proxyConfig = { base, quality,
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
@@ -177,7 +188,14 @@
     if (!proxyConfig || !isHttp(orig)) return orig;
 
     const cached = proxyUrlCache.get(orig);
-    if (cached) return cached;
+    if (cached) {
+      // LRU touch: re-insert so frequently-hit URLs are evicted last (Map
+      // preserves insertion order). FIFO evicted the oldest insert, which
+      // punished exactly the hot keys on long-lived pages.
+      proxyUrlCache.delete(orig);
+      proxyUrlCache.set(orig, cached);
+      return cached;
+    }
 
     const { base, quality, maxWidth, grayscale } = proxyConfig;
     const parts = [
@@ -270,7 +288,7 @@
       ? (el.currentSrc || el.getAttribute("src") || "")
       : (el.getAttribute("src") || "");
     const failedSrcUrl = failedSrc ? resolveImage(failedSrc) : null;
-    if (failedSrcUrl?.hostname.toLowerCase() === proxyHost) {
+    if (failedSrcUrl?.hostname === proxyHost) {
       el.setAttribute(FAILED_PROXY_SRC_ATTR, failedSrcUrl.href);
     } else {
       el.removeAttribute(FAILED_PROXY_SRC_ATTR);
@@ -338,7 +356,7 @@
     // Force lazy loading on <img> elements that don't specify it. The HTML
     // parser sets the loading attribute natively, bypassing prehook's
     // HTMLImageElement.prototype.loading patch, so layer 2 handles it here.
-    if (el.tagName === "IMG" && !el.hasAttribute("loading")) {
+    if (el.tagName === "IMG" && !pageExcluded && !el.hasAttribute("loading")) {
       el.setAttribute("loading", "lazy");
     }
 
@@ -596,13 +614,14 @@
   function stop() {
     if (destroyed) return;
     destroyed = true;
-    try { mo && mo.disconnect(); } catch {}
+    try { mo.disconnect(); } catch {}
     pendingMutations = [];
     mutationOverflowed = false;
   }
 
-  let mo = null;
-  mo = new MutationObserver(queueMutationFlush);
+  // stop() can only run via the pagehide listener registered after the full
+  // IIFE body evaluates, so `const` is safe here (no TDZ window).
+  const mo = new MutationObserver(queueMutationFlush);
 
   mo.observe(document, {
     childList:       true,
@@ -638,16 +657,23 @@
   chrome.storage.onChanged.addListener((changes, area) => {
     if (destroyed) return;
     if (area === "local" && changes.bhOpts) {
-      applyOpts(changes.bhOpts.newValue || DEFAULTS);
+      // Skip mirror echoes of our own sync-fallback write below. applyOpts is
+      // idempotent, so re-applying was wasted work — on a sync storm it doubled
+      // settings processing. Service-worker mirrors that actually change the
+      // value still differ from `opts` and pass through.
+      const next = { ...DEFAULTS, ...(changes.bhOpts.newValue || {}) };
+      if (sameOpts(next, opts)) return;
+      applyOpts(next);
       publishSettings();
     } else if (area === "sync") {
       chrome.storage.sync.get(DEFAULTS, synced => {
         if (destroyed) return;
         const changed = !sameOpts(synced, opts);
+        if (!changed) return;
         applyOpts(synced);
         publishSettings();
         // The service worker normally refreshes the mirror; only write when it differs.
-        if (changed) chrome.storage.local.set({ bhOpts: opts });
+        chrome.storage.local.set({ bhOpts: opts });
       });
     }
   });

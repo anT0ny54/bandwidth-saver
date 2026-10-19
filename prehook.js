@@ -6,6 +6,15 @@
   // Fixed image proxy. MAIN-world code cannot use extension APIs.
   const WSRV_PROXY = "https://wsrv.nl/";
   const SETTINGS_EVENT = "__BANDWIDTH_SAVER_SETTINGS__";
+  // Defaults mirror content.js, defaults.js and service-worker.js. Older local
+  // mirrors may be partial, so normalize every incoming snapshot before use.
+  const DEFAULTS = {
+    enabled: true, saveData: true, quality: 60, grayscale: true,
+    maxWidth: 768, excludeDomains: "", fallbackToOrigin: true
+  };
+  // Derived from WSRV_PROXY so the proxy host lives in exactly one string per
+  // file (parity with content.js).
+  const proxyHost = new URL(WSRV_PROXY).hostname;
 
   let opts = null;
   let ready = false;
@@ -13,7 +22,8 @@
   let proxyConfig = null;
   const proxyUrlCache = new Map();
   const PROXY_CACHE_LIMIT = 512;
-  const pageHost = location.hostname.toLowerCase();
+  // location.hostname is spec-lowercase already.
+  const pageHost = location.hostname;
   let pageExcluded = false;   // cached excludedHost(pageHost), rebuilt on settings change
   const pending = new Set(); // <img>/<source> elements waiting for opts to be ready
   let srcsetCache = new WeakMap();
@@ -25,6 +35,9 @@
   const RESTORED_SRCSET_ATTR = "data-bw-restored-srcset";
   const FAILED_PROXY_SRC_ATTR = "data-bw-failed-proxy-src";
   const FAILED_PROXY_SRCSET_ATTR = "data-bw-failed-proxy-srcset";
+  const ORIGINAL_PRELOAD_HREF_ATTR = "data-bw-original-preload-href";
+  const APPLIED_PRELOAD_HREF_ATTR = "data-bw-applied-preload-href";
+  const PENDING_PRELOAD_HREF_ATTR = "data-bh-preload-href";
   const RESTORED_STATE_ATTRS = [
     "data-bw-restored", RESTORED_SRC_ATTR, RESTORED_SRCSET_ATTR,
     FAILED_PROXY_SRC_ATTR, FAILED_PROXY_SRCSET_ATTR,
@@ -49,9 +62,14 @@
   const ICON_URL_RE = /favicon|\.ico(?:[?#]|$)/i;
 
   function updateProxyConfig(next) {
-    opts = next;
+    opts = { ...DEFAULTS, ...(next && typeof next === "object" ? next : {}) };
     const base = WSRV_PROXY;
-    const quality = Math.max(1, Math.min(100, Number(opts.quality ?? 60) || 60));
+    // ?? catches null/undefined; Number.isFinite catches NaN. Crucially, 0
+    // stays 0 so Math.max(1, …) clamps it to 1 — the old `|| 60` turned 0
+    // into 60 and silently bypassed the clamp.
+    const rawQuality = Number(opts.quality ?? DEFAULTS.quality);
+    const quality = Math.max(1, Math.min(100,
+      Number.isFinite(rawQuality) ? Math.trunc(rawQuality) : DEFAULTS.quality));
     const maxWidth = Number(opts.maxWidth) || 0;
     proxyConfig = { base, quality,
       maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
@@ -111,7 +129,14 @@
     if (!proxyConfig || !isHttp(orig)) return orig;
 
     const cached = proxyUrlCache.get(orig);
-    if (cached) return cached;
+    if (cached) {
+      // LRU touch: re-insert so frequently-hit URLs are evicted last (Map
+      // preserves insertion order). FIFO evicted the oldest insert, which
+      // punished exactly the hot keys on long-lived pages.
+      proxyUrlCache.delete(orig);
+      proxyUrlCache.set(orig, cached);
+      return cached;
+    }
 
     const { base, quality, maxWidth, grayscale } = proxyConfig;
     const parts = [
@@ -267,7 +292,7 @@
 
   // Shared skip decision for a resolved absolute http(s) URL (srcset + src).
   function skipAbsolute(urlObj) {
-    if (urlObj.hostname === "wsrv.nl" || SVG_URL_RE.test(urlObj.href) ||
+    if (urlObj.hostname === proxyHost || SVG_URL_RE.test(urlObj.href) ||
         ICON_URL_RE.test(urlObj.href) || isTiny(urlObj.href.toLowerCase())) return true;
     return excludedHost(urlObj.hostname);
   }
@@ -307,7 +332,7 @@
     // Never proxy a URL that is already produced by wsrv.nl. This is important
     // because content.js also rewrites parser-created images; without this guard
     // the prehook wraps the wsrv URL a second time.
-    if (urlObj.hostname === "wsrv.nl") return original;
+    if (urlObj.hostname === proxyHost) return original;
     if (!ready || !opts) return null; // queue until settings are known
     if (!opts.enabled) return original;
     if (pageExcluded) return original;
@@ -334,12 +359,63 @@
     const urlObj = safeURL(original);
     if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
     // Already a proxy URL (e.g. re-processing our own write): leave it alone.
-    if (urlObj.hostname === "wsrv.nl") return original;
+    if (urlObj.hostname === proxyHost) return original;
     if (!ready || !opts) return null; // queue until settings are known
     if (!opts.enabled) return original;
     if (pageExcluded) return original;
     if (skipAbsolute(urlObj)) return original;
     return buildProxyUrl(urlObj.href);
+  }
+
+  function restorePreloadHref(el) {
+    const original = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) ||
+      el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
+    if (!original) return;
+
+    const current = el.getAttribute("href") || "";
+    const applied = el.getAttribute(APPLIED_PRELOAD_HREF_ATTR);
+    // Do not overwrite a URL the page deliberately assigned after changing the
+    // link's purpose. Restore only our placeholder or the exact proxy URL we wrote.
+    if (current === "about:blank" || (applied && current === applied)) {
+      setAttr.call(el, "href", original);
+    }
+    el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+    el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+    el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
+    pending.delete(el);
+  }
+
+  function applyPreloadHref(el, original) {
+    const current = el.getAttribute("href") || "";
+    const decided = decidePreloadHref(original);
+    if (decided === null) {
+      el.setAttribute(PENDING_PRELOAD_HREF_ATTR, original);
+      el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+      pending.add(el);
+      if (current !== "about:blank") setAttr.call(el, "href", "about:blank");
+      return;
+    }
+
+    el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
+    pending.delete(el);
+    if (decided !== original) {
+      setAttr.call(el, ORIGINAL_PRELOAD_HREF_ATTR, original);
+      setAttr.call(el, APPLIED_PRELOAD_HREF_ATTR, decided);
+    } else {
+      el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+    }
+    if (current !== decided) setAttr.call(el, "href", decided);
+  }
+
+  function willBeImagePreloadLink(el, name, value) {
+    const rel = name === "rel" ? String(value ?? "") : (el.getAttribute("rel") || "");
+    const as = name === "as" ? String(value ?? "").toLowerCase() :
+      String(el.getAttribute("as") || "").toLowerCase();
+    const type = name === "type" ? String(value ?? "") : String(el.getAttribute("type") || "");
+    return /(?:^|\s)preload(?:\s|$)/i.test(rel) &&
+      (as === "image" || (!as && /^image\//i.test(type)));
   }
 
   // Called from the setAttribute patch, the link.href property patch, the
@@ -348,25 +424,18 @@
   function processPreloadLink(el) {
     try {
       if (destroyed) return;
-      if (!isImagePreloadLink(el)) return;
-      const stashed = el.dataset.bhPreloadHref;
+      if (!(el instanceof HTMLLinkElement)) return;
+      if (!isImagePreloadLink(el)) {
+        restorePreloadHref(el);
+        return;
+      }
+      const stashed = el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
+      const savedOriginal = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
       const current = el.getAttribute("href");
       // decidePreloadHref must see the ORIGINAL url, never "about:blank".
-      const original = stashed || current;
+      const original = stashed || savedOriginal || current;
       if (!original || original === "about:blank") return;
-      const decided = decidePreloadHref(original);
-      if (decided === null) {
-        // Settings not loaded yet: stash the original and drop href so the
-        // browser cannot start downloading the full-resolution image.
-        if (!stashed) el.dataset.bhPreloadHref = original;
-        pending.add(el);
-        // Never write the same value from inside an observed attribute callback;
-        // same-value setAttribute can still enqueue a mutation in some engines.
-        if (current !== "about:blank") setAttr.call(el, "href", "about:blank");
-      } else {
-        if (stashed) el.removeAttribute("data-bh-preload-href");
-        if (current !== decided) setAttr.call(el, "href", decided);
-      }
+      applyPreloadHref(el, original);
     } catch {}
   }
 
@@ -513,14 +582,7 @@
         try { s = String(value); } catch {}
         try {
           if (isImagePreloadLink(this)) {
-            const decided = decidePreloadHref(s);
-            if (decided === null) {
-              this.dataset.bhPreloadHref = s;
-              pending.add(this);
-              linkHrefDesc.set.call(this, "about:blank");
-              return;
-            }
-            linkHrefDesc.set.call(this, decided);
+            applyPreloadHref(this, s);
             return;
           }
         } catch {}
@@ -553,8 +615,21 @@
 
       if (this instanceof HTMLLinkElement &&
           (n === "href" || n === "rel" || n === "as" || n === "type")) {
-        // Let the attribute land first so isImagePreloadLink() sees the full
-        // rel/as/href combination (order of attribute sets is page-controlled).
+        if (n === "href" && isImagePreloadLink(this)) {
+          // Decide before the raw href reaches the browser; setting it first can
+          // start an unoptimized preload before processPreloadLink cancels it.
+          applyPreloadHref(this, String(value ?? ""));
+          return;
+        }
+
+        if (n !== "href" && willBeImagePreloadLink(this, n, value)) {
+          // A link can receive href before rel/as/type. Rewrite or park its
+          // current href before the attribute makes it an active image preload.
+          const original = this.getAttribute(PENDING_PRELOAD_HREF_ATTR) ||
+            this.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) || this.getAttribute("href");
+          if (original && original !== "about:blank") applyPreloadHref(this, original);
+        }
+
         setAttr.call(this, name, value);
         processPreloadLink(this);
         return;

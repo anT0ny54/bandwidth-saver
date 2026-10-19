@@ -189,8 +189,21 @@ excludeBtn.addEventListener("click", async () => {
 // tabs.create() works everywhere.
 
 settingsBtn.addEventListener("click", () => {
-  chrome.tabs.create({ url: chrome.runtime.getURL("options.html") })
-    .catch(() => chrome.runtime.openOptionsPage?.());
+  const fallback = () => {
+    try {
+      chrome.runtime.openOptionsPage?.(() => {
+        // Read lastError inside the callback for older callback-only browsers.
+        void chrome.runtime.lastError;
+      });
+    } catch {}
+  };
+  try {
+    chrome.tabs.create({ url: chrome.runtime.getURL("options.html") }, () => {
+      if (chrome.runtime.lastError) fallback();
+    });
+  } catch {
+    fallback();
+  }
 });
 
 // ── Sync with changes made on the settings page ───────────────────────────────

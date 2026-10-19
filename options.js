@@ -56,7 +56,10 @@ function fmtBytes(n) {
 async function reloadCurrentPage() {
   const isHttpUrl = url => /^https?:\/\//i.test(String(url || ""));
   try {
-    const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Single query covers both the fast path (active tab) and the fallback
+    // (most recently accessed HTTP(S) tab), halving the round-trips.
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const active = tabs.find(t => t.active);
     if (active?.id && isHttpUrl(active.url)) {
       await chrome.tabs.reload(active.id);
       return;
@@ -64,7 +67,6 @@ async function reloadCurrentPage() {
 
     // When settings are opened in a new tab, the settings tab itself is active.
     // Prefer the most recently accessed HTTP(S) tab in the same window.
-    const tabs = await chrome.tabs.query({ currentWindow: true });
     const page = tabs
       .filter(tab => tab.id != null && isHttpUrl(tab.url))
       .sort((a, b) => Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0))[0];
@@ -253,9 +255,14 @@ async function resetAll() {
 }
 
 async function resetStats() {
-  await chrome.storage.local.set({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } });
-  await load();
-  showToast("Stats cleared");
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "BW_RESET_STATS" });
+    if (!result?.ok) throw new Error(result?.error || "The service worker could not reset statistics.");
+    await load();
+    showToast("Stats cleared");
+  } catch {
+    showToast("Couldn't reset stats", "err");
+  }
 }
 
 // ── Event wiring ──────────────────────────────────────────────────────────────

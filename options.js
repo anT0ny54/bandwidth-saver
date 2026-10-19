@@ -178,8 +178,10 @@ customWidthEl.addEventListener("input", () => {
 // These two feel like instant switches; everything else uses the Save button.
 
 enabledEl.addEventListener("change", async () => {
-  await chrome.storage.sync.set({ enabled: !!enabledEl.checked });
-  showToast(enabledEl.checked ? "Compression enabled" : "Compression disabled", "ok");
+  const enabled = !!enabledEl.checked;
+  await chrome.storage.sync.set({ enabled });
+  await reloadCurrentPage();
+  showToast(enabled ? "Compression enabled" : "Compression disabled", "ok");
 });
 
 grayscaleEl.addEventListener("change", async () => {
@@ -202,8 +204,8 @@ async function save() {
     showToast("Quality must be 1–100", "err");
     return;
   }
-  if (cw !== "" && !/^\d+$/.test(cw)) {
-    showToast("Width must be 0 or a positive number", "err");
+  if (cw !== "" && (!/^\d+$/.test(cw) || !Number.isSafeInteger(Number(cw)))) {
+    showToast("Width must be a safe whole number (0 or greater)", "err");
     return;
   }
   const quality = readQuality();
@@ -236,8 +238,17 @@ async function save() {
 // ── Reset ─────────────────────────────────────────────────────────────────────
 
 async function resetAll() {
+  const current = await chrome.storage.sync.get(DEFAULTS);
   await chrome.storage.sync.set(DEFAULTS);
   await load();
+
+  const affectsCurrentPage =
+    !!current.enabled !== DEFAULTS.enabled ||
+    Number(current.quality ?? DEFAULTS.quality) !== DEFAULTS.quality ||
+    Number(current.maxWidth ?? DEFAULTS.maxWidth) !== DEFAULTS.maxWidth ||
+    String(current.excludeDomains ?? DEFAULTS.excludeDomains) !== DEFAULTS.excludeDomains ||
+    !!current.grayscale !== DEFAULTS.grayscale;
+  if (affectsCurrentPage) await reloadCurrentPage();
   showToast("Reset to defaults");
 }
 

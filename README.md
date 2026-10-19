@@ -23,13 +23,14 @@
 - **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`.
 - **Inline CSS backgrounds:** best-effort rewriting of HTTP(S) `url(...)` values in inline `background-image`.
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
-- **Per-image proxy fallback:** failed proxy image loads restore the saved original URL and set `data-bw-restored`.
+- **Per-image proxy fallback:** failed proxy image loads restore the saved original URL, ignore immediate retries of the same failed proxy URL, and allow the element to be reused for a different image.
 - **Configurable quality, grayscale, maximum width, and excluded domains.**
 - **Double-proxy protection:** wsrv.nl URLs are never wrapped again.
 - **Bounded URL/cache work:** proxy URL caches are capped and srcset work is cached per element.
 - **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup.
 - **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms.
-- **CSP handling:** Declarative Net Request removes CSP response headers on eligible page/frame requests.
+- **CSP handling:** Declarative Net Request removes CSP response headers on eligible page/frame requests while image compression is enabled.
+- **Independent Save-Data hint:** the optional `Save-Data: on` request header remains active when enabled, even if image compression is turned off.
 - **Reproducible build:** `build.sh` validates, stages, timestamps, packages, and verifies the extension deterministically.
 
 ### Default settings
@@ -139,6 +140,26 @@ An earlier DNR `regexSubstitution` approach could not safely URL-encode a captur
 
 Image URL rewriting is consequently performed by `prehook.js` and `content.js`, where `encodeURIComponent()` is available. DNR is retained only for CSP response-header handling. Legacy image redirect Rule 1 is removed on service-worker refresh.
 
+## 🎯 Image-loading coverage and limits
+
+The extension covers the main DOM-driven image paths: `<img src>`, responsive
+`srcset` on `<img>` and `<picture><source>`, image preload links, the supported
+lazy-load `data-*` attributes, inline `background-image` URLs, and changes to
+those resources made through common DOM properties/attributes or inserted DOM
+nodes. `srcset` candidate descriptors are preserved, and each candidate is
+classified independently. Failed proxy state is limited to the failed source;
+reusing that element for a different URL can be intercepted normally.
+
+This is not a universal network-level image filter. Browser-native parser loads
+can begin before extension storage is available, and DOM rewriting may cancel
+those requests only after they have started. URLs inside external or cross-origin
+CSS stylesheets, shadow roots, CSS `image-set()` options written as bare strings,
+and image bytes fetched through `fetch`/XHR and later turned into blob URLs or
+canvas/WebGL content are not reliably discoverable by the current DOM hooks.
+The extension intentionally does not rewrite arbitrary network requests, since
+that would also affect scripts, documents, API responses, and other non-image
+resources.
+
 ## 🚫 Images intentionally skipped
 
 The URL classifier skips:
@@ -178,7 +199,7 @@ The popup provides:
 
 The settings page provides:
 
-- enable/disable
+- enable/disable (reloads the active web page so current resources match the new state)
 - grayscale
 - quality presets or custom 1–100
 - maximum-width presets or custom values ≥ 0
@@ -186,7 +207,7 @@ The settings page provides:
 - statistics and reset
 - reset-to-defaults
 
-Quality, width, and excluded-domain changes reload the active page when needed. Existing resources are not retroactively guaranteed to change without a reload.
+Quality, width, enable/disable, reset-to-defaults, and excluded-domain changes reload the active HTTP(S) page when needed. Grayscale changes show a reload prompt because already-loaded proxy images cannot be recoloured in place. Existing resources are not retroactively guaranteed to change without a reload. Save-Data changes apply to subsequent HTTP(S) requests without requiring a page reload, and the header setting remains independent of whether image compression is enabled.
 
 ## 🔐 Permissions
 
@@ -194,7 +215,7 @@ From `manifest.json`:
 
 - `storage` — settings, local mirror, and statistics
 - `tabs` — active-tab URL lookup and reload
-- `declarativeNetRequestWithHostAccess` — CSP response-header removal
+- `declarativeNetRequestWithHostAccess` — CSP response-header removal and Save-Data request-header modification
 - `webRequest` — read-only observation of wsrv.nl image responses for statistics
 - `<all_urls>` host access — required for document-start interception on websites
 

@@ -21,6 +21,15 @@
   let preloadObserver = null; // declared up front; stop() references it
   const ORIGINAL_SRC_ATTR = "data-bw-original-src";
   const ORIGINAL_SRCSET_ATTR = "data-bw-original-srcset";
+  const RESTORED_SRC_ATTR = "data-bw-restored-src";
+  const RESTORED_SRCSET_ATTR = "data-bw-restored-srcset";
+  const FAILED_PROXY_SRC_ATTR = "data-bw-failed-proxy-src";
+  const FAILED_PROXY_SRCSET_ATTR = "data-bw-failed-proxy-srcset";
+  const RESTORED_STATE_ATTRS = [
+    "data-bw-restored", RESTORED_SRC_ATTR, RESTORED_SRCSET_ATTR,
+    FAILED_PROXY_SRC_ATTR, FAILED_PROXY_SRCSET_ATTR,
+    ORIGINAL_SRC_ATTR, ORIGINAL_SRCSET_ATTR
+  ];
 
   const safeURL = (u, base = document.baseURI) => {
     try { return new URL(u, base); } catch { return null; }
@@ -62,6 +71,35 @@
   // originals must pass through both worlds untouched, never re-proxied.
   const isRestored = el =>
     !!el && el.nodeType === 1 && el.getAttribute?.("data-bw-restored") === "1";
+
+  function sameResolvedUrl(a, b) {
+    const ua = safeURL(a);
+    const ub = safeURL(b);
+    if (ua && ub && /^https?:$/.test(ua.protocol) && /^https?:$/.test(ub.protocol)) {
+      return ua.href === ub.href;
+    }
+    return String(a ?? "") === String(b ?? "");
+  }
+
+  // A failed proxy restore is sticky only for the failed source. Ignore an
+  // immediate lazy-loader retry of that proxy URL, allow the restored original
+  // through unchanged, and clear the state when the page assigns a new source.
+  function restoredAssignment(el, kind, value) {
+    if (!isRestored(el)) return "continue";
+    const src = kind === "src";
+    const text = String(value ?? "");
+    const failed = el.getAttribute(src ? FAILED_PROXY_SRC_ATTR : FAILED_PROXY_SRCSET_ATTR);
+    if (failed && (src ? sameResolvedUrl(text, failed) : text === failed)) return "ignore";
+
+    const restored = el.getAttribute(src ? RESTORED_SRC_ATTR : RESTORED_SRCSET_ATTR);
+    const current = el.getAttribute(kind);
+    const expected = restored ?? current ?? "";
+    const matches = src ? sameResolvedUrl(text, expected) : text === expected;
+    if (matches) return "keep";
+
+    for (const attr of RESTORED_STATE_ATTRS) el.removeAttribute(attr);
+    return "continue";
+  }
 
   function rememberOriginal(el, src, srcset) {
     if (!opts?.fallbackToOrigin || !el || el.nodeType !== 1) return;
@@ -151,7 +189,7 @@
           }
         }
         const pendingSrc = el.dataset.bhPendingSrc;
-        if (pendingSrc) {
+        if (pendingSrc !== undefined) {
           el.removeAttribute("data-bh-pending-src");
           const decided = decideSrc(pendingSrc, el) ?? pendingSrc;
           if (decided !== pendingSrc) {
@@ -162,7 +200,7 @@
           else setAttr.call(el, "src", decided); // <source> pending src
         }
         const pendingSrcset = el.dataset.bhPendingSrcset;
-        if (pendingSrcset) {
+        if (pendingSrcset !== undefined) {
           el.removeAttribute("data-bh-pending-srcset");
           const rewritten = rewriteSrcset(pendingSrcset, el);
           if (el instanceof HTMLImageElement) {
@@ -236,7 +274,7 @@
 
   function rewriteSrcset(ss, el) {
     if (!ss) return ss;
-    if (pageExcluded) return ss;
+    if (!opts?.enabled || pageExcluded) return ss;
     if (isRestored(el)) return ss;
 
     if (el) {
@@ -281,11 +319,15 @@
   // A preload hint makes the browser download the full-resolution image URL
   // directly — bypassing every <img> patch. We therefore rewrite the preload's
   // href to the proxy URL (or stash and blank it until settings are known).
-  const isImagePreloadLink = el =>
-    el instanceof HTMLLinkElement &&
-    /(?:^|\s)preload(?:\s|$)/i.test(el.rel || "") &&
-    (String(el.getAttribute("as") || "").toLowerCase() === "image" ||
-     /^image\//i.test(el.getAttribute("type") || ""));
+  const isImagePreloadLink = el => {
+    if (!(el instanceof HTMLLinkElement) || !/(?:^|\s)preload(?:\s|$)/i.test(el.rel || "")) {
+      return false;
+    }
+    const as = String(el.getAttribute("as") || "").toLowerCase();
+    const type = String(el.getAttribute("type") || "");
+    // An image MIME type must not override an explicit non-image `as` value.
+    return as === "image" || (!as && /^image\//i.test(type));
+  };
 
   function decidePreloadHref(original) {
     if (!original || !String(original).trim()) return original;
@@ -342,7 +384,9 @@
       // same value (a Symbol would throw a ReferenceError out of the handler).
       let s;
       try { s = String(value); } catch { s = ""; }
-      if (isRestored(this)) { nativeSetSrc(this, s); return; }
+      const restored = restoredAssignment(this, "src", s);
+      if (restored === "ignore") return;
+      if (restored === "keep") { nativeSetSrc(this, s); return; }
       try {
         const decided = decideSrc(s, this);
         if (decided === null) {
@@ -374,8 +418,10 @@
       get: srcsetDesc.get,
       set(value) {
         let v = "";
-        try { v = String(value || ""); } catch {}
-        if (isRestored(this)) { nativeSetSrcset(this, v); return; }
+        try { v = String(value ?? ""); } catch {}
+        const restored = restoredAssignment(this, "srcset", v);
+        if (restored === "ignore") return;
+        if (restored === "keep") { nativeSetSrcset(this, v); return; }
         try {
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
@@ -403,8 +449,10 @@
       get: sourceSrcsetDesc.get,
       set(value) {
         let v = "";
-        try { v = String(value || ""); } catch {}
-        if (isRestored(this)) { nativeSourceSetSrcset(this, v); return; }
+        try { v = String(value ?? ""); } catch {}
+        const restored = restoredAssignment(this, "srcset", v);
+        if (restored === "ignore") return;
+        if (restored === "keep") { nativeSourceSetSrcset(this, v); return; }
         try {
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
@@ -514,9 +562,12 @@
 
       if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
       if (this instanceof HTMLImageElement && (n === "src" || n === "srcset")) {
-        if (isRestored(this)) return setAttr.call(this, name, value);
+        const incoming = String(value ?? "");
+        const restored = restoredAssignment(this, n, incoming);
+        if (restored === "ignore") return;
+        if (restored === "keep") return setAttr.call(this, name, value);
         if (n === "src") {
-          const original = String(value);
+          const original = incoming;
           const decided = decideSrc(original, this);
           if (decided === null) {
             this.dataset.bhPendingSrc = original;
@@ -529,7 +580,7 @@
           }
           return setAttr.call(this, "src", decided);
         } else if (n === "srcset") {
-          const v = String(value || "");
+          const v = incoming;
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
@@ -540,11 +591,20 @@
           return setAttr.call(this, "srcset", rewritten);
         }
       }
-      if (this instanceof HTMLSourceElement && (n === "srcset" || n === "src") && isRestored(this)) {
-        return setAttr.call(this, name, value);
+      if (this instanceof HTMLSourceElement && (n === "srcset" || n === "src")) {
+        const incoming = String(value ?? "");
+        const restored = restoredAssignment(this, n, incoming);
+        if (restored === "ignore") return;
+        if (restored === "keep") return setAttr.call(this, name, value);
+        if (n === "src") {
+          // Non-picture <source src> is media; only picture sources are image candidates.
+          if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+            return setAttr.call(this, name, value);
+          }
+        }
       }
       if (this instanceof HTMLSourceElement && n === "srcset") {
-        const v = String(value || "");
+        const v = String(value ?? "");
         if (!ready || !opts) {
           this.dataset.bhPendingSrcset = v;
           pending.add(this);

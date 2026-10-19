@@ -16,8 +16,6 @@ const excludeBtn  = $("excludeBtn");
 const settingsBtn = $("settingsBtn");
 const presetBtns  = Array.from(document.querySelectorAll("#qualityPresets .preset"));
 
-const PRESETS = [45, 60, 80];
-
 // Full settings state. Storage change events only carry the changed keys, so they
 // must be merged into this — merging into DEFAULTS reset unchanged keys (e.g. a
 // disabled extension appeared enabled after toggling grayscale).
@@ -38,14 +36,18 @@ function findExcludedDomain(host, domains) {
   return domains.find(domain => host === domain || host.endsWith(`.${domain}`)) || "";
 }
 
-function nearestPreset(q) {
-  return PRESETS.reduce((best, v) =>
-    Math.abs(v - q) < Math.abs(best - q) ? v : best, PRESETS[0]);
+function setActivePreset(q) {
+  // Custom qualities should not masquerade as the closest built-in preset.
+  presetBtns.forEach(b => b.classList.toggle("active", Number(b.dataset.q) === Number(q)));
 }
 
-function setActivePreset(q) {
-  const match = nearestPreset(q);
-  presetBtns.forEach(b => b.classList.toggle("active", Number(b.dataset.q) === match));
+async function reloadActiveTab() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id && /^https?:\/\//i.test(String(tab.url || ""))) {
+      await chrome.tabs.reload(tab.id);
+    }
+  } catch {}
 }
 
 function showNudge() {
@@ -85,6 +87,8 @@ enabledEl.addEventListener("change", async () => {
   const enabled = enabledEl.checked;
   await chrome.storage.sync.set({ enabled });
   updateEnabledUI(enabled);
+  await reloadActiveTab();
+  window.close();
 });
 
 // ── Grayscale ─────────────────────────────────────────────────────────────────

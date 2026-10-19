@@ -14,9 +14,8 @@
 //  approach in MV3.
 //
 //  DNR is kept only for header work, which needs no URL encoding: Rule 2
-//  strips CSP response headers (active while the extension is enabled) and
-//  Rule 3 adds the Save-Data request header (only when the saveData setting
-//  is on).
+//  strips CSP response headers while image compression is enabled. Rule 3
+//  adds Save-Data whenever its own setting is on, independently of compression.
 //
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -118,8 +117,11 @@ function getHeaderInt(headers, name) {
   if (!Array.isArray(headers)) return null;
   const target = String(name).toLowerCase();
   const h = headers.find(h => String(h.name).toLowerCase() === target);
-  const n = h ? Number.parseInt(h.value, 10) : NaN;
-  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+  if (!h || typeof h.value !== "string") return null;
+  const value = h.value.trim();
+  if (!/^\d+$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
 }
 
 if (chrome.webRequest) {
@@ -182,8 +184,8 @@ function onProxyCompleted({ url, responseHeaders, fromCache, statusCode }) {
 
 // ── DNR rules ─────────────────────────────────────────────────────────────────
 // Rule 1 (redirect) is intentionally not added — see top-of-file explanation.
-// Rule 2 (CSP stripping) is always active; Rule 3 (Save-Data) is added only
-// when the saveData setting is enabled.
+// Rule 2 (CSP stripping) is active only while image compression is enabled.
+// Rule 3 (Save-Data) follows its own setting, even when compression is disabled.
 //
 // Uses callback form throughout — the Promise-returning form of chrome APIs
 // (e.g. await chrome.storage.sync.get()) is not available in classic
@@ -193,32 +195,37 @@ function doRefreshRules(done) {
   chrome.storage.sync.get(DEFAULTS, function(opts) {
     var removeRuleIds = ALL_RULE_IDS;
 
-    if (!opts.enabled) {
-      chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds: removeRuleIds }, done);
-      return;
-    }
-
     // Excluded sites are never proxied, so they keep their own CSP. DNR rejects the
     // whole update on an invalid domain, so only well-formed hostnames are passed.
     var excluded = String(opts.excludeDomains || "").split(/[,\s]+/)
       .map(function(s) { return s.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""); })
       .filter(function(s) { return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(s); });
+    var excludedDomainList = Array.from(new Set(excluded));
     var condition = { resourceTypes: ["main_frame", "sub_frame"] };
-    if (excluded.length) condition.excludedRequestDomains = Array.from(new Set(excluded));
+    if (excludedDomainList.length) {
+      // Request-domain exclusions protect direct navigations; initiator
+      // exclusions also preserve CSP for frames opened by excluded sites.
+      condition.excludedRequestDomains = excludedDomainList;
+      condition.excludedInitiatorDomains = excludedDomainList;
+    }
 
-    // Rule 2: Strip CSP headers so proxy-domain images aren't blocked by the page.
-    var addRules = [{
-      id: RULE_ID_CSP,
-      priority: 1,
-      action: {
-        type: "modifyHeaders",
-        responseHeaders: [
-          { header: "content-security-policy",             operation: "remove" },
-          { header: "content-security-policy-report-only", operation: "remove" }
-        ]
-      },
-      condition: condition
-    }];
+    var addRules = [];
+
+    // Rule 2: Strip CSP only while image URL rewriting is enabled.
+    if (opts.enabled) {
+      addRules.push({
+        id: RULE_ID_CSP,
+        priority: 1,
+        action: {
+          type: "modifyHeaders",
+          responseHeaders: [
+            { header: "content-security-policy",             operation: "remove" },
+            { header: "content-security-policy-report-only", operation: "remove" }
+          ]
+        },
+        condition: condition
+      });
+    }
 
     // Rule 3: Replaces the old MV2 webRequestBlocking implementation.
     // DNR can safely set the request header in MV3 without blocking JavaScript.
@@ -233,8 +240,9 @@ function doRefreshRules(done) {
       var saveDataCondition = {
         regexFilter: "^https?://"
       };
-      if (excluded.length) {
-        saveDataCondition.excludedRequestDomains = Array.from(new Set(excluded));
+      if (excludedDomainList.length) {
+        saveDataCondition.excludedRequestDomains = excludedDomainList;
+        saveDataCondition.excludedInitiatorDomains = excludedDomainList;
       }
 
       addRules.push({

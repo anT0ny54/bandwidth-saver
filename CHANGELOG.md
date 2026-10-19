@@ -5,64 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.7] - 2026-10-19
+## [0.1.8] - 2026-10-19
 
 ### Fixed
 
-- **Popup exclusion indicator with trailing-dot domains**: the popup's domain
-  parser did not strip a trailing dot (e.g. `example.com.`). The background
-  script and content scripts excluded such domains correctly, but the popup
-  showed the site as not excluded. The parser now normalizes domains the same
-  way the background/content layers do.
-- **Symbol-argument crash in the MAIN-world `src` setter** (`prehook.js`): the
-  setter's catch handler re-converted the assigned value with `String(value)`.
-  If a page assigned a Symbol, that conversion would throw inside the handler
-  and turn a handled error into an uncaught one. The value is now converted
-  once, outside the handler, with a safe fallback.
-- **Dead conditional in the lazy-attribute rewriter** (`content.js`): the code
-  checked whether the iterated attribute name was a srcset attribute, which is
-  impossible there (data-srcset is handled in a separate branch). The
-  impossible branch is removed with a comment explaining why only the original
-  src is remembered.
-- **MAIN-world catch fallbacks** (`prehook.js`): the `src`/`srcset`/`loading`
-  and `link.href` setter catch handlers still forwarded the raw assigned
-  value; a Symbol rethrows on string conversion and escaped as an uncaught
-  error. Every catch fallback now uses the value converted once, safely,
-  before the try block.
-- **Restored images re-proxied** (`prehook.js`, `content.js`):
-  `data-bw-restored` was only honored by the isolated full-scan. The
-  MAIN-world property setters and `setAttribute` patch, and the
-  content-script mutation re-scan, now pass restored elements through
-  untouched, so a restored original `src`/`srcset` (including `<source>`
-  candidates) is no longer silently routed back through the proxy.
-
-### Removed
-
-- **Tracking-pixel/URL pattern matching** (`content.js`, `prehook.js`): the
-  ad/tracking endpoint regex (`pagead`, `doubleclick`, `google-analytics`,
-  `criteo`, and friends) and the tiny-URL name matching (`1x1`, `2x2`,
-  `pixel`, `spacer`, `tracking`) were removed. The extension no longer
-  inspects or matches tracking-related URL patterns; content images are still
-  skipped when they carry explicit tiny dimensions (≤ 32) in width/height
-  query parameters, and the README skip list reflects this.
-- **Dead `proxyBase` plumbing** (`prehook.js`, `content.js`): the proxy is
-  hardcoded to `wsrv.nl`, so the injected `proxyBase` field and every
-  always-true `!opts.proxyBase` check are removed; the settings event payload
-  no longer carries the field.
-- **Constant `sep: "?"` proxy-config field** — inlined at the single call
-  site in both worlds.
+- **Queued responsive images while disabled** (`prehook.js`): pending `srcset`
+  values are no longer rewritten during settings flush when compression is off;
+  empty pending `src`/`srcset` values are also cleaned up correctly.
+- **Failed-image recovery on reused elements** (`prehook.js`, `content.js`): a
+  failed proxy URL is remembered so lazy-loader retries do not replace the
+  restored image, while assigning a genuinely new source clears the old restore
+  state and restores normal interception.
+- **Enable/reset behavior** (`content.js`, `popup.js`, `options.js`): enabling
+  compression schedules a scan of already-present DOM images, and UI enable,
+  disable, and reset actions reload the active HTTP(S) page when necessary.
+- **Excluded-site handling** (`service-worker.js`): CSP stripping and Save-Data
+  rules now exclude requests initiated by excluded domains as well as direct
+  requests to those domains, including frames opened by excluded pages.
+- **Statistics input validation** (`service-worker.js`): byte headers must be
+  complete non-negative integer strings; partial values such as `123junk` are
+  no longer counted.
+- **Image preload classification** (`prehook.js`, `content.js`): an explicit
+  non-image `as` value is no longer overridden by an image MIME type.
+- **Picture-source fallback** (`content.js`): when a proxied image candidate
+  fails, sibling `<picture><source>` candidates are restored too, including
+  cases where the `<img>` itself has no `src` or `srcset` to restore.
+- **Mutation-queue overflow recovery** (`content.js`): the mutation backlog now
+  has a strict record cap and performs a forced DOM reconciliation if records
+  are dropped, preserving coverage under heavy DOM churn.
+- **Independent Save-Data setting** (`service-worker.js`): the Save-Data request
+  rule remains active when enabled even if image compression is disabled; CSP
+  stripping still follows the compression toggle.
 
 ### Changed
 
-- Corrected a stale DNR-rules comment in the service worker ("only Rule 2 is
-  active" — Rule 3/Save-Data is also conditionally active).
-- `content.js` parses each candidate URL exactly once (`resolveImage`
-  returns the `URL` object reused by `shouldSkip`/`buildProxyUrl`), replacing
-  the previous resolve-then-reparse flow.
-- Corrected the service-worker banner comment, which still claimed only DNR
-  Rule 2 exists; Rules 2 (CSP stripping) and 3 (Save-Data header) are both
-  described accurately now.
-- Corrected the MAIN-world proxy-comment conflict: the code intentionally
-  sends `default=1` (the proxy falls back to the source image when its own
-  processing fails); the comment that claimed the opposite is fixed.
-- Version bumped to `0.1.7`.
+- Updated the README with concrete DOM interception coverage and known limits,
+  and clarified when setting changes reload the active page.
+- Updated the build workflow to use the same checkout action major as the
+  keep-alive workflow.
+
+### Removed
+
+- Removed the popup's nearest-preset helper and unused preset constant; custom
+  quality values no longer falsely highlight a built-in preset.
+

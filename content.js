@@ -67,6 +67,10 @@
   const ORIGINAL_SRC_ATTR = "data-bw-original-src";
   const ORIGINAL_SRCSET_ATTR = "data-bw-original-srcset";
   const RESTORED_ATTR = "data-bw-restored";
+  const RESTORED_SRC_ATTR = "data-bw-restored-src";
+  const RESTORED_SRCSET_ATTR = "data-bw-restored-srcset";
+  const FAILED_PROXY_SRC_ATTR = "data-bw-failed-proxy-src";
+  const FAILED_PROXY_SRCSET_ATTR = "data-bw-failed-proxy-srcset";
   let excludedDomains = new Set();
   const proxyHost = "wsrv.nl"; // proxy is fixed (WSRV_PROXY)
   const pageHost = location.hostname.toLowerCase();
@@ -149,12 +153,14 @@
   }
 
   function applyOpts(next) {
+    const wasEnabled = !!opts?.enabled;
     updateProxyConfig(next);
     srcsetCache = new WeakMap();
     dataSrcsetCache = new WeakMap();
     proxyUrlCache.clear();
     excludedDomains = domainSet(opts.excludeDomains);
     pageExcluded = excludedHost(pageHost);
+    if (!wasEnabled && opts.enabled) scheduleInitialRewrite();
   }
 
   function publishSettings() {
@@ -164,7 +170,7 @@
     }));
   }
 
-  const sameOpts = (a, b) => !!a && !!b && ["enabled", "quality", "grayscale", "maxWidth", "excludeDomains", "fallbackToOrigin"]
+  const sameOpts = (a, b) => !!a && !!b && ["enabled", "saveData", "quality", "grayscale", "maxWidth", "excludeDomains", "fallbackToOrigin"]
     .every(k => a[k] === b[k]);
 
   function buildProxyUrl(orig) {
@@ -235,12 +241,47 @@
 
   function restoreOriginalImage(el) {
     if (!opts?.fallbackToOrigin || !el || el.nodeType !== 1) return false;
+
+    // An <img> inside <picture> may be loading a candidate from a sibling
+    // <source>, so the failed proxy URL and saved original can live on that
+    // source rather than on the <img>. Restore every direct source candidate
+    // first; this also works when the <img> itself has no src/srcset fallback.
+    if (el.tagName === "IMG" && el.parentElement?.tagName === "PICTURE") {
+      for (const sibling of el.parentElement.children) {
+        if (sibling.tagName === "SOURCE") restoreOriginalImage(sibling);
+      }
+    }
+
     if (el.getAttribute(RESTORED_ATTR) === "1") return false;
     const src = el.getAttribute(ORIGINAL_SRC_ATTR);
     const srcset = el.getAttribute(ORIGINAL_SRCSET_ATTR);
     if (!src && !srcset) return false;
 
+    // Retain enough context to ignore an immediate retry of the same failed
+    // proxy URL without permanently disabling this DOM element if a page later
+    // reuses it for a different image.
     el.setAttribute(RESTORED_ATTR, "1");
+    if (src) el.setAttribute(RESTORED_SRC_ATTR, src);
+    else el.removeAttribute(RESTORED_SRC_ATTR);
+    if (srcset) el.setAttribute(RESTORED_SRCSET_ATTR, srcset);
+    else el.removeAttribute(RESTORED_SRCSET_ATTR);
+
+    const failedSrc = el.tagName === "IMG"
+      ? (el.currentSrc || el.getAttribute("src") || "")
+      : (el.getAttribute("src") || "");
+    const failedSrcUrl = failedSrc ? resolveImage(failedSrc) : null;
+    if (failedSrcUrl?.hostname.toLowerCase() === proxyHost) {
+      el.setAttribute(FAILED_PROXY_SRC_ATTR, failedSrcUrl.href);
+    } else {
+      el.removeAttribute(FAILED_PROXY_SRC_ATTR);
+    }
+    const failedSrcset = el.getAttribute("srcset") || "";
+    if (failedSrcset.includes(WSRV_PROXY)) {
+      el.setAttribute(FAILED_PROXY_SRCSET_ATTR, failedSrcset);
+    } else {
+      el.removeAttribute(FAILED_PROXY_SRCSET_ATTR);
+    }
+
     doneImg.add(el);
     doneLazy.add(el);
 
@@ -413,8 +454,9 @@
     if (!el || el.tagName !== "LINK") return;
     if (!opts?.enabled) return;
     if (!/(?:^|\s)preload(?:\s|$)/i.test(el.rel || "")) return;
-    if (String(el.getAttribute("as") || "").toLowerCase() !== "image" &&
-        !/^image\//i.test(el.getAttribute("type") || "")) return;
+    const as = String(el.getAttribute("as") || "").toLowerCase();
+    const type = String(el.getAttribute("type") || "");
+    if (as !== "image" && (as || !/^image\//i.test(type))) return;
 
     const href = el.getAttribute("href");
     const u = href ? resolveImage(href) : null;
@@ -432,9 +474,19 @@
     rewritePreload(el);
   }
 
-  function rewriteAll() {
+  function rewriteAll(force = false) {
     if (destroyed) return;
-    document.querySelectorAll(CANDIDATE_SELECTOR).forEach(processCandidate);
+    const candidates = document.querySelectorAll(CANDIDATE_SELECTOR);
+    candidates.forEach(el => {
+      if (force) {
+        // A full reconciliation scan must be able to repair missed mutation
+        // records, not just revisit elements already marked as processed.
+        doneImg.delete(el);
+        doneLazy.delete(el);
+        doneBg.delete(el);
+      }
+      processCandidate(el);
+    });
   }
 
   function scheduleInitialRewrite() {
@@ -443,7 +495,7 @@
     // behind querySelectorAll plus attribute writes on huge documents.
     setTimeout(() => {
       if (destroyed) return;
-      rewriteAll();
+      rewriteAll(true);
     }, 0);
   }
 
@@ -487,7 +539,7 @@
           doneLazy.delete(t);
           lazyTargets.add(t);
         } else if (m.target.tagName === "LINK" &&
-                   (m.attributeName === "href" || m.attributeName === "rel" || m.attributeName === "as")) {
+                   (m.attributeName === "href" || m.attributeName === "rel" || m.attributeName === "as" || m.attributeName === "type")) {
           preloadTargets.add(t);
         }
       }
@@ -504,14 +556,19 @@
   }
 
   const MUTATION_RECORD_LIMIT = 2000;
+  let mutationOverflowed = false;
 
   function queueMutationFlush(mutations) {
     if (destroyed) return;
-    // Bound memory during pathological DOM churn. A bounded loss here is safer
-    // than an unbounded array that can pin the main thread until navigation.
+    // Keep a strict memory bound. If records are dropped, reconcile the current
+    // DOM after the bounded batch so missed attribute changes/additions are not
+    // silently left unprocessed.
     for (const m of mutations) {
+      if (pendingMutations.length >= MUTATION_RECORD_LIMIT) {
+        mutationOverflowed = true;
+        break;
+      }
       pendingMutations.push(m);
-      if (pendingMutations.length >= MUTATION_RECORD_LIMIT) break;
     }
     if (mutationFlushQueued) return;
     mutationFlushQueued = true;
@@ -519,8 +576,17 @@
       mutationFlushQueued = false;
       if (destroyed) return;
       const batch = pendingMutations;
+      const needsReconcile = mutationOverflowed;
       pendingMutations = [];
+      mutationOverflowed = false;
       processMutations(batch);
+      if (needsReconcile) {
+        // Yield again before the potentially large full-page scan so overflow
+        // recovery does not extend the mutation-flush task unnecessarily.
+        setTimeout(() => {
+          if (!destroyed) rewriteAll(true);
+        }, 0);
+      }
     };
     // Use a macrotask, not a microtask. Microtask chains can starve Chrome's
     // navigation commit when a page keeps mutating during click-to-navigation.
@@ -532,6 +598,7 @@
     destroyed = true;
     try { mo && mo.disconnect(); } catch {}
     pendingMutations = [];
+    mutationOverflowed = false;
   }
 
   let mo = null;
@@ -541,7 +608,7 @@
     childList:       true,
     subtree:         true,
     attributes:      true,
-    attributeFilter: ["src", "srcset", "style", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as"]
+    attributeFilter: ["src", "srcset", "style", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as", "type"]
   });
 
   // ── Load settings then process page ───────────────────────────────────────
@@ -553,7 +620,6 @@
     if (d.bhOpts) {
       applyOpts(d.bhOpts);
       publishSettings();
-      if (opts.enabled) scheduleInitialRewrite();
     } else {
       chrome.storage.sync.get(DEFAULTS, synced => {
         if (destroyed) return;
@@ -561,7 +627,6 @@
         publishSettings();
         // Write mirror so next page load takes the fast path
         chrome.storage.local.set({ bhOpts: opts });
-        if (opts.enabled) scheduleInitialRewrite();
       });
     }
   });

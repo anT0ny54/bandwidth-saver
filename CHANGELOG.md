@@ -5,10 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.9] - 2026-10-19
 
 ### Fixed
 
+- **Picture source property interception** (`prehook.js`): `HTMLSourceElement.prototype.src` assignments for `<picture><source>` elements are now patched like `srcset`, so script-set source URLs cannot bypass early interception.
+- **Protected picture-source fallback** (`prehook.js`): if an eligible `<picture><source>` `src`/`srcset` rewrite unexpectedly fails, the attribute is parked instead of falling through to the original HTTP(S) URL.
 - **Missing MAIN-world defaults** (`prehook.js`): added the missing `DEFAULTS`
   object and merge defaults into partial settings snapshots. Older or partial
   local mirrors no longer throw while building proxy configuration and leave
@@ -38,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed unrelated third-party project promotion from `README.md`; the documentation stays focused on this extension.
 - `updateIcon()` (`service-worker.js`) accepts the known `enabled` value from
   `storage.onChanged`, skipping an extra `storage.sync` read per toggle.
 - `reloadCurrentPage()` (`options.js`) uses a single `chrome.tabs.query` call

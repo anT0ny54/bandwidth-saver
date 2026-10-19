@@ -85,6 +85,7 @@ Injected at `document_start`, in the MAIN execution world (`"world": "MAIN"` is 
 - `HTMLImageElement.prototype.src`
 - `HTMLImageElement.prototype.srcset`
 - `HTMLSourceElement.prototype.srcset`
+- `HTMLSourceElement.prototype.src`
 - `HTMLImageElement.prototype.loading`
 - `HTMLLinkElement.prototype.href`
 - `Element.prototype.setAttribute`
@@ -150,8 +151,9 @@ Image URL rewriting is consequently performed by `prehook.js` and `content.js`, 
 
 ## 🎯 Image-loading coverage and limits
 
-The extension covers the main DOM-driven image paths: `<img src>`, responsive
-`srcset` on `<img>` and `<picture><source>`, image preload links, the supported
+The extension covers the main DOM-driven image paths: `<img src>`,
+responsive `srcset` on `<img>` and `<picture><source>`, picture-source `src`
+property/attribute assignments, image preload links, the supported
 lazy-load `data-*` attributes, inline `background-image` URLs, and changes to
 those resources made through common DOM properties/attributes or inserted DOM
 nodes. `srcset` candidate descriptors are preserved, and each candidate is
@@ -308,7 +310,9 @@ See `LICENSE` and the source files for applicable third-party licensing and attr
 
 ## 🔗 Related projects (not part of this repository)
 
-The services below are maintained separately and are **not** part of this repository, its build pipeline, or its release cycle. They are listed here for convenience only.
+The services below are maintained separately and are **not** part of this
+repository, its build pipeline, or its release cycle. They are listed here for
+convenience only; listing them does not configure the browser to use them.
 
 ### 🌐 Free DNS Services
 
@@ -325,9 +329,12 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 
 ### ⚡ Bandwidth Hero Server
 
-A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
+A lightweight image optimization proxy designed to slash bandwidth usage and
+accelerate web browsing.
 
-Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
+Bandwidth Hero Server fetches remote images, compresses them on the fly, and
+delivers optimized versions to the client. This significantly reduces data
+consumption while improving page load performance.
 
 🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
 

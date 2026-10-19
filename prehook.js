@@ -256,6 +256,7 @@
   const srcsetDesc = Object.getOwnPropertyDescriptor(imgProto, "srcset");
   const setAttr = Element.prototype.setAttribute;
   const sourceProto = HTMLSourceElement?.prototype;
+  const sourceSrcDesc = sourceProto ? Object.getOwnPropertyDescriptor(sourceProto, "src") : null;
   const sourceSrcsetDesc = sourceProto ? Object.getOwnPropertyDescriptor(sourceProto, "srcset") : null;
   const loadingDesc = Object.getOwnPropertyDescriptor(imgProto, "loading");
   const linkProto = HTMLLinkElement.prototype;
@@ -263,6 +264,7 @@
 
   function nativeSetSrc(el, v) { srcDesc.set.call(el, v); }
   function nativeSetSrcset(el, v) { srcsetDesc?.set?.call(el, v); }
+  function nativeSourceSetSrc(el, v) { sourceSrcDesc?.set?.call(el, v); }
   function nativeSourceSetSrcset(el, v) { sourceSrcsetDesc?.set?.call(el, v); }
 
   // Spec-style srcset parser: a comma inside a URL (e.g. Cloudinary "w_400,h_300")
@@ -541,6 +543,45 @@
     });
   }
 
+  // ── Patch <source>.src inside <picture> ───────────────────────────────────
+  // Property assignment bypasses Element.prototype.setAttribute. Only picture
+  // sources are image candidates; media <source> src values stay untouched.
+  if (sourceProto && sourceSrcDesc && sourceSrcDesc.set) {
+    Object.defineProperty(sourceProto, "src", {
+      configurable: true,
+      enumerable: sourceSrcDesc.enumerable,
+      get: sourceSrcDesc.get,
+      set(value) {
+        let s = "";
+        try { s = String(value); } catch {}
+        const restored = restoredAssignment(this, "src", s);
+        if (restored === "ignore") return;
+        if (restored === "keep") { nativeSourceSetSrc(this, s); return; }
+        try {
+          if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+            nativeSourceSetSrc(this, s);
+            return;
+          }
+          const decided = decideSrc(s, this);
+          if (decided === null) {
+            this.dataset.bhPendingSrc = s;
+            pending.add(this);
+            nativeSourceSetSrc(this, "about:blank");
+            return;
+          }
+          if (decided !== s) {
+            const u = safeURL(s);
+            rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || s, null);
+          }
+          nativeSourceSetSrc(this, decided);
+        } catch {
+          if (ready && opts?.enabled && isHttp(s)) nativeSourceSetSrc(this, "about:blank");
+          else nativeSourceSetSrc(this, s);
+        }
+      }
+    });
+  }
+
   // ── Patch <img>.loading ──────────────────────────────────────────────────────
   // Force lazy loading while the extension is active so offscreen images are
   // never downloaded. Explicit eager requests from the page are respected so
@@ -711,8 +752,13 @@
     } catch {
       // If an eligible image rewrite unexpectedly fails, do not fall through to
       // the original HTTP(S) value while protection is active.
+      const protectedPictureSource =
+        this instanceof HTMLSourceElement &&
+        this.parentElement?.tagName === "PICTURE" &&
+        (n === "src" || n === "srcset");
       if (ready && opts?.enabled &&
-          this instanceof HTMLImageElement && (n === "src" || n === "srcset")) {
+          (this instanceof HTMLImageElement || protectedPictureSource) &&
+          (n === "src" || n === "srcset")) {
         return setAttr.call(this, n, n === "src" ? "about:blank" : "");
       }
     }

@@ -29,7 +29,7 @@ function parseDomains(text) {
   return String(text || "")
     .split(/[,\s]+/)
     .map(s => s.trim().toLowerCase()).filter(Boolean)
-    .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""));
+    .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""));
 }
 
 function findExcludedDomain(host, domains) {
@@ -44,7 +44,7 @@ function setActivePreset(q) {
 async function reloadActiveTab() {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id && /^https?:\/\//i.test(String(tab.url || ""))) {
+    if (tab?.id != null && /^https?:\/\//i.test(String(tab.url || ""))) {
       await chrome.tabs.reload(tab.id);
     }
   } catch {}
@@ -75,7 +75,13 @@ function updateEnabledUI(enabled) {
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 async function load() {
-  state = await chrome.storage.sync.get(DEFAULTS);
+  try {
+    state = await chrome.storage.sync.get(DEFAULTS);
+  } catch {
+    // A rejected storage read must not leave the popup stuck on the
+    // "Checking status…" placeholder — fall back to the shared defaults.
+    state = { ...DEFAULTS };
+  }
   applyUI(state);
   loadSiteUI(state);
 }
@@ -85,7 +91,13 @@ load();
 
 enabledEl.addEventListener("change", async () => {
   const enabled = enabledEl.checked;
-  await chrome.storage.sync.set({ enabled });
+  try {
+    await chrome.storage.sync.set({ enabled });
+  } catch {
+    enabledEl.checked = !enabled;
+    updateEnabledUI(!enabled);
+    return;
+  }
   updateEnabledUI(enabled);
   await reloadActiveTab();
   window.close();
@@ -96,7 +108,13 @@ enabledEl.addEventListener("change", async () => {
 // the page can't change without a reload.
 
 grayscaleEl.addEventListener("change", async () => {
-  await chrome.storage.sync.set({ grayscale: grayscaleEl.checked });
+  const grayscale = grayscaleEl.checked;
+  try {
+    await chrome.storage.sync.set({ grayscale });
+  } catch {
+    grayscaleEl.checked = !grayscale;
+    return;
+  }
   showNudge();
 });
 
@@ -105,13 +123,14 @@ grayscaleEl.addEventListener("change", async () => {
 presetBtns.forEach(btn => {
   btn.addEventListener("click", async () => {
     const quality = Number(btn.dataset.q);
-    presetBtns.forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    await chrome.storage.sync.set({ quality });
+    setActivePreset(quality);
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.id) await chrome.tabs.reload(tab.id);
-    } catch {}
+      await chrome.storage.sync.set({ quality });
+    } catch {
+      setActivePreset(state.quality ?? DEFAULTS.quality);
+      return;
+    }
+    await reloadActiveTab();
     window.close();
   });
 });
@@ -119,10 +138,7 @@ presetBtns.forEach(btn => {
 // ── Reload current tab ────────────────────────────────────────────────────────
 
 reloadBtn.addEventListener("click", async () => {
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) chrome.tabs.reload(tab.id);
-  } catch {}
+  await reloadActiveTab();
   window.close();
 });
 
@@ -173,13 +189,20 @@ async function loadSiteUI(d) {
 
 excludeBtn.addEventListener("click", async () => {
   if (!currentIsWeb || !currentHost) return;
-  const d    = await chrome.storage.sync.get(DEFAULTS);
-  const list = new Set(parseDomains(d.excludeDomains));
+  // `state` is kept current by the storage.onChanged listener below, so no
+  // redundant storage.sync read is needed here.
+  const list = new Set(parseDomains(state.excludeDomains));
   const excludedDomain = findExcludedDomain(currentHost, Array.from(list));
   if (excludedDomain) list.delete(excludedDomain);
   else list.add(currentHost);
-  await chrome.storage.sync.set({ excludeDomains: Array.from(list).join(" ") });
-  state.excludeDomains = Array.from(list).join(" ");
+  const excludeDomains = Array.from(list).join(" ");
+  try {
+    await chrome.storage.sync.set({ excludeDomains });
+  } catch {
+    loadSiteUI(state); // storage did not change; restore the current pill/button
+    return;
+  }
+  state.excludeDomains = excludeDomains;
   loadSiteUI(state); // refresh the pill/button immediately
   showNudge(); // page must reload for the change to take effect
 });

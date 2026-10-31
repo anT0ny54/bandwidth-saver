@@ -27,6 +27,8 @@
   let pageExcluded = false;   // cached excludedHost(pageHost), rebuilt on settings change
   const pending = new Set(); // <img>/<source> elements waiting for opts to be ready
   let srcsetCache = new WeakMap();
+  // Clamped once per applyOpts(); see the matching hoist in content.js.
+  let dpr = 1;
   let destroyed = false; // true once the page is navigating away; stop all DOM work
   let preloadObserver = null; // declared up front; stop() references it
   const ORIGINAL_SRC_ATTR = "data-bw-original-src";
@@ -49,10 +51,10 @@
   };
   const toDomainSet = text => new Set(
     String(text || "")
-      .split(/[, \n\r\t]+/)
+      .split(/[\s,]+/)
       .map(s => s.trim().toLowerCase())
       .filter(Boolean)
-      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""))
+      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
   );
   const isHttp = u => /^https?:\/\//i.test(u);
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
@@ -62,28 +64,67 @@
   const ICON_URL_RE = /favicon|\.ico(?:[?#]|$)/i;
 
   function updateProxyConfig(next) {
+    // Local mirrors written by older versions may not contain every setting.
+    // Merge defaults before publishing to the MAIN world so one missing field
+    // cannot leave its early-interception hooks parked on about:blank.
     opts = { ...DEFAULTS, ...(next && typeof next === "object" ? next : {}) };
-    const base = WSRV_PROXY;
     // ?? catches null/undefined; Number.isFinite catches NaN. Crucially, 0
     // stays 0 so Math.max(1, …) clamps it to 1 — the old `|| 60` turned 0
     // into 60 and silently bypassed the clamp.
+    // Invalid maxWidth values fall back to DEFAULTS.maxWidth rather than
+    // 0: a corrupt legacy value must not silently disable the width cap.
     const rawQuality = Number(opts.quality ?? DEFAULTS.quality);
     const quality = Math.max(1, Math.min(100,
       Number.isFinite(rawQuality) ? Math.trunc(rawQuality) : DEFAULTS.quality));
-    const maxWidth = Number(opts.maxWidth) || 0;
-    proxyConfig = { base, quality,
-      maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
+    const rawMaxWidth = Number(opts.maxWidth ?? DEFAULTS.maxWidth);
+    const maxWidth = Number.isFinite(rawMaxWidth)
+      ? Math.max(0, Math.trunc(rawMaxWidth))
+      : DEFAULTS.maxWidth;
+    // Store the normalized values back on the merged snapshot. That keeps
+    // settings comparisons exact and prevents legacy string values from
+    // repeatedly invalidating caches or looking like a settings change.
+    opts.enabled = !!opts.enabled;
+    opts.saveData = !!opts.saveData;
+    opts.grayscale = !!opts.grayscale;
+    opts.fallbackToOrigin = !!opts.fallbackToOrigin;
+    opts.excludeDomains = String(opts.excludeDomains ?? DEFAULTS.excludeDomains);
+    opts.quality = quality;
+    opts.maxWidth = maxWidth;
+    proxyConfig = { base: WSRV_PROXY, quality, maxWidth, grayscale: opts.grayscale };
   }
 
   // Single place that (re)builds every derived value from a settings object.
   function applyOpts(next) {
     updateProxyConfig(next);
+    dpr = Math.min(2, Math.max(1, Number(globalThis.devicePixelRatio) || 1));
     srcsetCache = new WeakMap();
     excludedDomains = toDomainSet(opts.excludeDomains);
     proxyUrlCache.clear();
     pageExcluded = excludedHost(pageHost);
     ready = true;
   }
+
+  // saveData is intentionally not compared: the MAIN world never reads it
+  // (no header access here), so a Save-Data-only toggle must not clear the
+  // proxy URL and srcset caches.
+  // Exclusion lists are compared by normalized effect, not raw spelling:
+  // separator style, whitespace, casing, optional schemes/paths, and leading/
+  // trailing dots all normalize to the same domain set and must not
+  // invalidate the proxy URL/srcset caches. (Same normalization as the
+  // popup/settings parsers and DNR validation.)
+  // KEEP IN SYNC with content.js.
+  const domainKey = text => Array.from(new Set(
+    String(text || "").split(/[,\s]+/)
+      .map(s => s.trim().toLowerCase()).filter(Boolean)
+      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
+  )).sort().join(" ");
+  const sameOpts = (a, b) => !!a && !!b &&
+    a.enabled === b.enabled &&
+    a.quality === b.quality &&
+    a.grayscale === b.grayscale &&
+    a.maxWidth === b.maxWidth &&
+    a.fallbackToOrigin === b.fallbackToOrigin &&
+    domainKey(a.excludeDomains) === domainKey(b.excludeDomains);
 
   // content.js marks failed-proxy restores with data-bw-restored; those
   // originals must pass through both worlds untouched, never re-proxied.
@@ -126,7 +167,7 @@
   }
 
   function buildProxyUrl(orig) {
-    if (!proxyConfig || !isHttp(orig)) return orig;
+    if (!proxyConfig) return orig;
 
     const cached = proxyUrlCache.get(orig);
     if (cached) {
@@ -145,9 +186,8 @@
     ];
 
     if (maxWidth) {
-      // Preserve aspect ratio and never enlarge smaller images. Limit DPR to 2
-      // so high-density displays do not silently double the requested pixels again.
-      const dpr = Math.min(2, Math.max(1, Number(globalThis.devicePixelRatio) || 1));
+      // Preserve aspect ratio and never enlarge smaller images. dpr was clamped
+      // in applyOpts() so high-density displays don't double-request pixels.
       parts.push("w=" + maxWidth, "fit=inside", "we=1", "dpr=" + dpr);
     }
 
@@ -216,11 +256,10 @@
         const pendingSrc = el.dataset.bhPendingSrc;
         if (pendingSrc !== undefined) {
           el.removeAttribute("data-bh-pending-src");
-          const decided = decideSrc(pendingSrc, el) ?? pendingSrc;
-          if (decided !== pendingSrc) {
-            const u = safeURL(pendingSrc);
-            rememberOriginal(el, (u && /^https?:$/.test(u.protocol) && u.href) || pendingSrc, null);
-          }
+          // applyOpts() ran before this flush (ready === true), so decideUrl()
+          // cannot return null here — the old `?? pendingSrc` was unreachable.
+          const decided = decideUrl(pendingSrc, el);
+          if (decided !== pendingSrc) rememberResolvedOriginal(el, pendingSrc);
           if (el instanceof HTMLImageElement) nativeSetSrc(el, decided);
           else setAttr.call(el, "src", decided); // <source> pending src
         }
@@ -242,8 +281,13 @@
   function receiveSettings(event) {
     if (destroyed || typeof event.detail !== "string") return;
     try {
-      const next = JSON.parse(event.detail);
-      if (!next || typeof next !== "object") return;
+      const parsed = JSON.parse(event.detail);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      const next = { ...DEFAULTS, ...parsed };
+      // Identical settings snapshots are common during mirror refreshes and
+      // storage storms. Re-applying them would clear both URL caches and
+      // rebuild derived state without changing behavior.
+      if (ready && sameOpts(next, opts)) return;
       applyOpts(next);
       flushPending();
     } catch {}
@@ -295,7 +339,7 @@
   // Shared skip decision for a resolved absolute http(s) URL (srcset + src).
   function skipAbsolute(urlObj) {
     if (urlObj.hostname === proxyHost || SVG_URL_RE.test(urlObj.href) ||
-        ICON_URL_RE.test(urlObj.href) || isTiny(urlObj.href.toLowerCase())) return true;
+        ICON_URL_RE.test(urlObj.href) || isTiny(urlObj.href)) return true;
     return excludedHost(urlObj.hostname);
   }
 
@@ -303,6 +347,10 @@
     if (!ss) return ss;
     if (!opts?.enabled || pageExcluded) return ss;
     if (isRestored(el)) return ss;
+    // srcset on <source> is an image candidate only inside <picture>. Media
+    // source elements can carry unrelated src metadata and must not be proxied.
+    if (el instanceof HTMLSourceElement &&
+        !(el.parentElement && el.parentElement.tagName === "PICTURE")) return ss;
 
     if (el) {
       const cached = srcsetCache.get(el);
@@ -325,10 +373,14 @@
     return output;
   }
 
-  function decideSrc(original, el) {
+  // Shared URL decision for <img>/<source> src and image-preload hrefs
+  // (pass no element for the preload case). Returns the original URL, null
+  // when settings are not known yet (the caller parks the element), or the
+  // proxy URL.
+  function decideUrl(original, el) {
     // img.src = "" is used by pages to clear an image; never proxy the page URL.
     if (!original || !String(original).trim()) return original;
-    if (isRestored(el)) return original;
+    if (el && isRestored(el)) return original;
     const urlObj = safeURL(original);
     if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
     // Never proxy a URL that is already produced by wsrv.nl. This is important
@@ -340,6 +392,13 @@
     if (pageExcluded) return original;
     if (skipAbsolute(urlObj)) return original;
     return buildProxyUrl(urlObj.href);
+  }
+
+  // Remember the resolved absolute URL when a rewrite actually happened;
+  // falls back to the raw string for non-HTTP(S) inputs.
+  function rememberResolvedOriginal(el, s) {
+    const u = safeURL(s);
+    rememberOriginal(el, (u && /^https?:$/.test(u.protocol) && u.href) || s, null);
   }
 
   // ── <link rel="preload" as="image"> support ──────────────────────────────────
@@ -355,19 +414,6 @@
     // An image MIME type must not override an explicit non-image `as` value.
     return as === "image" || (!as && /^image\//i.test(type));
   };
-
-  function decidePreloadHref(original) {
-    if (!original || !String(original).trim()) return original;
-    const urlObj = safeURL(original);
-    if (!urlObj || !/^https?:$/.test(urlObj.protocol)) return original;
-    // Already a proxy URL (e.g. re-processing our own write): leave it alone.
-    if (urlObj.hostname === proxyHost) return original;
-    if (!ready || !opts) return null; // queue until settings are known
-    if (!opts.enabled) return original;
-    if (pageExcluded) return original;
-    if (skipAbsolute(urlObj)) return original;
-    return buildProxyUrl(urlObj.href);
-  }
 
   function restorePreloadHref(el) {
     const original = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) ||
@@ -389,7 +435,7 @@
 
   function applyPreloadHref(el, original) {
     const current = el.getAttribute("href") || "";
-    const decided = decidePreloadHref(original);
+    const decided = decideUrl(original, null);
     if (decided === null) {
       el.setAttribute(PENDING_PRELOAD_HREF_ATTR, original);
       el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
@@ -434,7 +480,7 @@
       const stashed = el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
       const savedOriginal = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
       const current = el.getAttribute("href");
-      // decidePreloadHref must see the ORIGINAL url, never "about:blank".
+      // decideUrl must see the ORIGINAL url, never "about:blank".
       const original = stashed || savedOriginal || current;
       if (!original || original === "about:blank") return;
       applyPreloadHref(el, original);
@@ -459,16 +505,13 @@
       if (restored === "ignore") return;
       if (restored === "keep") { nativeSetSrc(this, s); return; }
       try {
-        const decided = decideSrc(s, this);
+        const decided = decideUrl(s, this);
         if (decided === null) {
           this.dataset.bhPendingSrc = s;
           pending.add(this);
           nativeSetSrc(this, "about:blank");
         } else {
-          if (decided !== s) {
-            const u = safeURL(s);
-            rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || s, null);
-          }
+          if (decided !== s) rememberResolvedOriginal(this, s);
           nativeSetSrc(this, decided);
         }
       } catch {
@@ -524,6 +567,12 @@
         const restored = restoredAssignment(this, "srcset", v);
         if (restored === "ignore") return;
         if (restored === "keep") { nativeSourceSetSrcset(this, v); return; }
+        // Media <source> elements are not image candidates; keep them untouched
+        // even while settings are still loading.
+        if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+          nativeSourceSetSrcset(this, v);
+          return;
+        }
         try {
           if (!ready || !opts) {
             this.dataset.bhPendingSrcset = v;
@@ -562,17 +611,14 @@
             nativeSourceSetSrc(this, s);
             return;
           }
-          const decided = decideSrc(s, this);
+          const decided = decideUrl(s, this);
           if (decided === null) {
             this.dataset.bhPendingSrc = s;
             pending.add(this);
             nativeSourceSetSrc(this, "about:blank");
             return;
           }
-          if (decided !== s) {
-            const u = safeURL(s);
-            rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || s, null);
-          }
+          if (decided !== s) rememberResolvedOriginal(this, s);
           nativeSourceSetSrc(this, decided);
         } catch {
           if (ready && opts?.enabled && isHttp(s)) nativeSourceSetSrc(this, "about:blank");
@@ -677,77 +723,64 @@
       }
 
       if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
-      if (this instanceof HTMLImageElement && (n === "src" || n === "srcset")) {
+      // n is known to be "src" or "srcset" here: the gate above returned
+      // early for every other attribute name.
+      if (this instanceof HTMLImageElement) {
         const incoming = String(value ?? "");
         const restored = restoredAssignment(this, n, incoming);
         if (restored === "ignore") return;
         if (restored === "keep") return setAttr.call(this, name, value);
         if (n === "src") {
           const original = incoming;
-          const decided = decideSrc(original, this);
+          const decided = decideUrl(original, this);
           if (decided === null) {
             this.dataset.bhPendingSrc = original;
             pending.add(this);
             return setAttr.call(this, "src", "about:blank");
           }
-          if (decided !== original) {
-            const u = safeURL(original);
-            rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || original, null);
-          }
+          if (decided !== original) rememberResolvedOriginal(this, original);
           return setAttr.call(this, "src", decided);
         } else if (n === "srcset") {
-          const v = incoming;
           if (!ready || !opts) {
-            this.dataset.bhPendingSrcset = v;
+            this.dataset.bhPendingSrcset = incoming;
             pending.add(this);
             return setAttr.call(this, "srcset", "");
           }
-          if (!opts.enabled) return setAttr.call(this, "srcset", v);
-          const rewritten = rewriteSrcset(v, this);
-          return setAttr.call(this, "srcset", rewritten);
+          if (!opts.enabled) return setAttr.call(this, "srcset", incoming);
+          return setAttr.call(this, "srcset", rewriteSrcset(incoming, this));
         }
       }
-      if (this instanceof HTMLSourceElement && (n === "srcset" || n === "src")) {
+      if (this instanceof HTMLSourceElement) {
+        // Non-picture <source> elements are media sources. Pass them through
+        // before the settings gate so their values are never parked/blanked.
+        if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+          return setAttr.call(this, name, value);
+        }
+
         const incoming = String(value ?? "");
         const restored = restoredAssignment(this, n, incoming);
         if (restored === "ignore") return;
         if (restored === "keep") return setAttr.call(this, name, value);
+
         if (n === "src") {
-          // Non-picture <source src> is media; only picture sources are image candidates.
-          if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
-            return setAttr.call(this, name, value);
+          const original = incoming;
+          const decided = decideUrl(original, this);
+          if (decided === null) {
+            this.dataset.bhPendingSrc = original;
+            pending.add(this);
+            return setAttr.call(this, "src", "about:blank");
           }
+          if (decided !== original) rememberResolvedOriginal(this, original);
+          return setAttr.call(this, "src", decided);
         }
-      }
-      if (this instanceof HTMLSourceElement && n === "srcset") {
-        const v = String(value ?? "");
+
         if (!ready || !opts) {
-          this.dataset.bhPendingSrcset = v;
+          this.dataset.bhPendingSrcset = incoming;
           pending.add(this);
           return setAttr.call(this, "srcset", "");
         }
-        if (!opts.enabled) return setAttr.call(this, "srcset", v);
-        const rewritten = rewriteSrcset(v, this);
-        return setAttr.call(this, "srcset", rewritten);
-      }
-      // <source src> inside <picture>: pages occasionally set src on picture
-      // sources even though srcset is the standard attribute. Restricted to
-      // PICTURE parents so <source> elements inside <video>/<audio> (whose src
-      // is media, not an image) are never routed through the image proxy.
-      if (this instanceof HTMLSourceElement && n === "src" &&
-          this.parentElement && this.parentElement.tagName === "PICTURE") {
-        const original = String(value);
-        const decided = decideSrc(original, this);
-        if (decided === null) {
-          this.dataset.bhPendingSrc = original;
-          pending.add(this);
-          return setAttr.call(this, "src", "about:blank");
-        }
-        if (decided !== original) {
-          const u = safeURL(original);
-          rememberOriginal(this, (u && /^https?:$/.test(u.protocol) && u.href) || original, null);
-        }
-        return setAttr.call(this, "src", decided);
+        if (!opts.enabled) return setAttr.call(this, "srcset", incoming);
+        return setAttr.call(this, "srcset", rewriteSrcset(incoming, this));
       }
     } catch {
       // If an eligible image rewrite unexpectedly fails, do not fall through to
@@ -757,8 +790,7 @@
         this.parentElement?.tagName === "PICTURE" &&
         (n === "src" || n === "srcset");
       if (ready && opts?.enabled &&
-          (this instanceof HTMLImageElement || protectedPictureSource) &&
-          (n === "src" || n === "srcset")) {
+          (this instanceof HTMLImageElement || protectedPictureSource)) {
         return setAttr.call(this, n, n === "src" ? "about:blank" : "");
       }
     }

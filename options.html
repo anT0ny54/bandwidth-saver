@@ -22,7 +22,6 @@
       --accent-soft: rgba(8,145,178,.13);
       --ok: #22c55e;
       --ok-soft: rgba(34,197,94,.12);
-      --warn: #f59e0b;
       --warn-soft: rgba(245,158,11,.12);
       --danger: #ef4444;
       --danger-soft: rgba(239,68,68,.12);
@@ -248,12 +247,11 @@
       border-color: var(--accent);
       box-shadow: 0 0 0 3px var(--accent-soft);
     }
-    input[type="number"] { -moz-appearance: textfield; }
     input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
 
     .stats {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
       gap: 8px;
     }
     .stat {
@@ -535,7 +533,7 @@
           <div class="field-label">wsrv.nl</div>
           <div class="hint" style="margin-top:0">
             Images are rewritten to <code>https://wsrv.nl/</code> before download.
-            The original URL is sent with the selected quality and max-width options, plus `fit=inside`, `we=1`, and a device pixel ratio clamped to 1–2 when width limiting is enabled, then returned as WebP with 1-day browser caching. Grayscale is added only when enabled.
+            The original URL is sent with the selected quality and max-width options, plus <code>fit=inside</code>, <code>we=1</code>, and a device pixel ratio clamped to 1–2 when width limiting is enabled, then returned as WebP with 1-day browser caching. Grayscale is added only when enabled.
           </div>
           <div class="hint">
             <a href="https://wsrv.nl/docs/" target="_blank" rel="noopener noreferrer">Open wsrv.nl documentation</a>
@@ -550,7 +548,7 @@
         <div class="row">
           <label class="field-label" for="excludeDomains">Skip these domains</label>
           <textarea id="excludeDomains" class="input" rows="3" placeholder="google.com, gstatic.com, example.com"></textarea>
-          <div class="hint">Space or comma separated. Matching sites bypass the proxy.</div>
+          <div class="hint">Space or comma separated. Optional <code>https://</code>, leading-dot, and trailing-dot forms are normalized; matching sites and subdomains bypass the proxy.</div>
         </div>
       </div>
     </section>

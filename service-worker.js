@@ -48,13 +48,30 @@ let pendingMirror  = false;
 function refreshRules() {
   if (refreshing) { pendingRefresh = true; return; }
   refreshing = true;
-  doRefreshRules(function() {
+  let settled = false;
+  const finish = function() {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
     refreshing = false;
     if (pendingRefresh) {
       pendingRefresh = false;
       refreshRules();
     }
-  });
+  };
+  // Mirrors the settings-mirror guard: some Chromium forks silently drop a
+  // storage/DNR callback instead of reporting lastError. Without a watchdog
+  // that dropped callback wedges every later rules refresh behind refreshing=true.
+  const watchdog = setTimeout(function() {
+    console.warn("[Bandwidth Saver] DNR rule refresh timed out; releasing refresh guard.");
+    finish();
+  }, 5000);
+  try {
+    doRefreshRules(finish);
+  } catch (error) {
+    console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", error);
+    finish();
+  }
 }
 
 // ── Local settings mirror ─────────────────────────────────────────────────────
@@ -65,27 +82,69 @@ function refreshRules() {
 function mirrorToLocal() {
   if (mirroring) { pendingMirror = true; return; }
   mirroring = true;
-  chrome.storage.sync.get(DEFAULTS, opts => {
-    chrome.storage.local.set({ bhOpts: opts }, () => {
-      mirroring = false;
-      if (pendingMirror) {
-        pendingMirror = false;
-        mirrorToLocal();
+  let settled = false;
+  const finish = function() {
+    if (settled) return;
+    settled = true;
+    mirroring = false;
+    if (pendingMirror) {
+      pendingMirror = false;
+      mirrorToLocal();
+    }
+  };
+  // Watchdog: if the sync read never invokes its callback (some forks drop
+  // it instead of reporting an error), release the guard so later settings
+  // changes are not stuck behind a dead lock forever.
+  const watchdog = setTimeout(function() {
+    console.warn("[Bandwidth Saver] Settings mirror timed out; releasing mirror guard.");
+    finish();
+  }, 5000);
+  const done = function() {
+    clearTimeout(watchdog);
+    finish();
+  };
+  try {
+    chrome.storage.sync.get(DEFAULTS, opts => {
+      try {
+        const error = chrome.runtime.lastError?.message || "";
+        if (error) console.warn("[Bandwidth Saver] Failed to read settings for mirror:", error);
+        // If sync failed and returned no snapshot, mirror the defaults so
+        // content scripts still receive a usable settings object.
+        chrome.storage.local.set({ bhOpts: (opts && !error) ? opts : DEFAULTS }, done);
+      } catch {
+        done();
       }
     });
-  });
+  } catch {
+    // A synchronous throw (e.g. storage.sync unavailable) must not leave the
+    // mirror guard stuck true forever.
+    done();
+  }
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(function() {
-  // Top-level mirrorToLocal()/refreshRules()/updateIcon() already ran on this
-  // same worker start; only seed missing sync keys here, don't redo the work.
-  chrome.storage.sync.get(DEFAULTS, function(d) {
-    chrome.storage.sync.set(d, function() {
-      mirrorToLocal(); // seed the local mirror for content scripts
+  // Top-level mirrorToLocal() already ran on this worker start and seeded the
+  // local mirror. Only seed sync keys that are genuinely missing. get(null)
+  // returns actually-stored keys only — with get(DEFAULTS) the defaults are
+  // pre-filled and "missing" can never be detected. Re-writing the full
+  // merged snapshot on every install/update was a wasted write plus a
+  // redundant second mirror pass. Guarded like every other storage call.
+  try {
+    chrome.storage.sync.get(null, function(all) {
+      const stored = all || {};
+      const missing = {};
+      for (const k of Object.keys(DEFAULTS)) {
+        if (!(k in stored)) missing[k] = DEFAULTS[k];
+      }
+      if (!Object.keys(missing).length) return; // mirror already seeded at worker start
+      const seed = function() { try { mirrorToLocal(); } catch {} };
+      try { chrome.storage.sync.set(missing, seed); } catch { seed(); }
     });
-  });
+  } catch {
+    try { mirrorToLocal(); } catch {}
+  }
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -95,33 +154,65 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if ("enabled" in changes) updateIcon(!!changes.enabled.newValue);
 });
 
+// ── Extension icon ────────────────────────────────────────────────────────────
+const ICON_PATH_ON  = { 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" };
+const ICON_PATH_OFF = { 16: "icons/icon-16-disabled.png", 32: "icons/icon-32-disabled.png", 48: "icons/icon-48-disabled.png", 128: "icons/icon-128-disabled.png" };
+
+// Startup sequence. Runs AFTER the icon-path constants exist: updateIcon()'s
+// synchronous fallback reads them, and a fork where chrome.storage.sync.get
+// throws synchronously must not hit a temporal-dead-zone ReferenceError.
 mirrorToLocal();
 refreshRules();
 updateIcon();
 
-// ── Extension icon ────────────────────────────────────────────────────────────
 function updateIcon(enabled) {
   const apply = on => {
-    const path = on
-      ? { 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" }
-      : { 16: "icons/icon-16-disabled.png", 32: "icons/icon-32-disabled.png", 48: "icons/icon-48-disabled.png", 128: "icons/icon-128-disabled.png" };
-    Promise.resolve(chrome.action.setIcon({ path })).catch(() => {});
+    const path = on ? ICON_PATH_ON : ICON_PATH_OFF;
+    // Some Chromium forks throw synchronously instead of returning a rejected
+    // promise — catch both so a broken setIcon can never kill worker startup.
+    try {
+      const r = chrome.action.setIcon({ path });
+      if (r && typeof r.catch === "function") r.catch(() => {});
+    } catch {}
   };
   // Callers that already know the value (storage.onChanged) skip the extra
   // storage.sync read; the startup call passes nothing and still reads sync.
   if (typeof enabled === "boolean") { apply(enabled); return; }
-  chrome.storage.sync.get({ enabled: DEFAULTS.enabled }, d => apply(!!d.enabled));
+  try {
+    chrome.storage.sync.get({ enabled: DEFAULTS.enabled }, d => {
+      const value = d && typeof d.enabled === "boolean" ? d.enabled : DEFAULTS.enabled;
+      apply(value);
+    });
+  } catch {
+    apply(DEFAULTS.enabled);
+  }
 }
 
 // ── Stats via webRequest response headers ─────────────────────────────────────
 // Reads content-length from proxy responses to track delivered proxy bytes.
 // Non-blocking — only observes, never delays requests.
+// Reused for the rare binaryValue header delivery; TextDecoder is stateless
+// for single-shot decodes, so one shared instance is safe.
+let headerDecoder = null;
+
 function getHeaderInt(headers, name) {
   if (!Array.isArray(headers)) return null;
   const target = String(name).toLowerCase();
   const h = headers.find(h => String(h.name).toLowerCase() === target);
-  if (!h || typeof h.value !== "string") return null;
-  const value = h.value.trim();
+  if (!h) return null;
+  let value = h.value;
+  // Some deliveries carry the header only as raw bytes (binaryValue) with no
+  // string value; decode those instead of silently dropping the response.
+  if (typeof value !== "string" && h.binaryValue) {
+    try {
+      headerDecoder || (headerDecoder = new TextDecoder());
+      value = headerDecoder.decode(new Uint8Array(h.binaryValue));
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value !== "string") return null;
+  value = value.trim();
   if (!/^\d+$/.test(value)) return null;
   const n = Number(value);
   return Number.isSafeInteger(n) ? n : null;
@@ -135,7 +226,7 @@ if (chrome.webRequest) {
   );
 }
 
-let pendingStats = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+let pendingStats = emptyStats();
 let statsFlushTimer = null;
 let statsFlushInProgress = false;
 let statsResetPending = false;
@@ -149,26 +240,64 @@ function emptyStats() {
 function flushStats() {
   if (statsFlushInProgress || statsResetPending || statsResetWriteInProgress ||
       !pendingStats.filesProcessed) return;
+
   statsFlushInProgress = true;
   const delta = pendingStats;
   pendingStats = emptyStats();
-  chrome.storage.local.get(
-    { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } },
-    d => {
-      const s = d.stats || { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+  let settled = false;
+
+  // Watchdog: forks that silently drop storage callbacks would otherwise leave
+  // the flush guard stuck true forever, discarding every later observation.
+  // finish(delta) preserves the batch for a later retry via retryDelta.
+  const watchdog = setTimeout(function() {
+    console.warn("[Bandwidth Saver] Stats flush timed out; releasing flush guard.");
+    finish(delta);
+  }, 5000);
+
+  const finish = function(retryDelta) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
+    statsFlushInProgress = false;
+
+    // Preserve observations when the write fails outside a reset so a later
+    // flush can retry instead of silently dropping the batch.
+    if (retryDelta && !statsResetPending) {
+      pendingStats.filesProcessed += retryDelta.filesProcessed;
+      pendingStats.bytesProcessed += retryDelta.bytesProcessed;
+      pendingStats.bytesSaved += retryDelta.bytesSaved;
+    }
+
+    if (statsResetPending) {
+      startStatsReset();
+    } else if (pendingStats.filesProcessed) {
+      scheduleStatsFlush();
+    }
+  };
+
+  const persist = function(d) {
+    try {
+      const s = (d && d.stats) || emptyStats();
       s.filesProcessed += delta.filesProcessed;
       s.bytesProcessed += delta.bytesProcessed;
       s.bytesSaved = (s.bytesSaved || 0) + delta.bytesSaved;
       chrome.storage.local.set({ stats: s }, () => {
-        statsFlushInProgress = false;
-        if (statsResetPending) {
-          startStatsReset();
-        } else if (pendingStats.filesProcessed) {
-          scheduleStatsFlush();
-        }
+        const error = chrome.runtime.lastError?.message || "";
+        if (error) console.warn("[Bandwidth Saver] Failed to flush stats:", error);
+        finish(error ? delta : null);
       });
+    } catch (error) {
+      console.warn("[Bandwidth Saver] Failed to flush stats:", error);
+      finish(delta);
     }
-  );
+  };
+
+  try {
+    chrome.storage.local.get({ stats: emptyStats() }, persist);
+  } catch (error) {
+    console.warn("[Bandwidth Saver] Failed to flush stats:", error);
+    persist(null);
+  }
 }
 
 function scheduleStatsFlush() {
@@ -183,8 +312,19 @@ function startStatsReset() {
   if (!statsResetPending || statsFlushInProgress || statsResetWriteInProgress) return;
   statsResetPending = false;
   statsResetWriteInProgress = true;
-  chrome.storage.local.set({ stats: emptyStats() }, () => {
-    const error = chrome.runtime.lastError?.message || "";
+  let settled = false;
+
+  // Watchdog: same dropped-callback fork case as the flush path — release the
+  // guard and report failure instead of wedging every later reset request.
+  const watchdog = setTimeout(function() {
+    console.warn("[Bandwidth Saver] Stats reset timed out; releasing reset guard.");
+    finish("timed out");
+  }, 5000);
+
+  const finish = function(error) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(watchdog);
     statsResetWriteInProgress = false;
 
     // A second reset may have arrived while this write was in flight. Complete
@@ -200,7 +340,18 @@ function startStatsReset() {
       try { sendResponse({ ok: !error, error }); } catch {}
     });
     if (pendingStats.filesProcessed) scheduleStatsFlush();
-  });
+  };
+
+  try {
+    chrome.storage.local.set({ stats: emptyStats() }, () => {
+      const error = chrome.runtime.lastError?.message || "";
+      if (error) console.warn("[Bandwidth Saver] Failed to reset stats:", error);
+      finish(error);
+    });
+  } catch (error) {
+    console.warn("[Bandwidth Saver] Failed to reset stats:", error);
+    finish(String(error?.message || error));
+  }
 }
 
 // Reset both persisted totals and the worker's in-memory batch. Serializing the
@@ -249,80 +400,104 @@ function onProxyCompleted({ responseHeaders, fromCache, statusCode }) {
 // (non-module) service workers on Kiwi/Cromite and causes Status code: 2.
 
 function doRefreshRules(done) {
-  chrome.storage.sync.get(DEFAULTS, function(opts) {
-    var removeRuleIds = ALL_RULE_IDS;
+  let settled = false;
+  const finish = function() {
+    if (settled) return;
+    settled = true;
+    done();
+  };
 
-    // Excluded sites are never proxied, so they keep their own CSP. DNR rejects the
-    // whole update on an invalid domain, so only well-formed hostnames are passed.
-    var excluded = String(opts.excludeDomains || "").split(/[,\s]+/)
-      .map(function(s) { return s.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""); })
-      .filter(function(s) { return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(s); });
-    var excludedDomainList = Array.from(new Set(excluded));
-    var condition = { resourceTypes: ["main_frame", "sub_frame"] };
-    if (excludedDomainList.length) {
-      // Request-domain exclusions protect direct navigations; initiator
-      // exclusions also preserve CSP for frames opened by excluded sites.
-      condition.excludedRequestDomains = excludedDomainList;
-      condition.excludedInitiatorDomains = excludedDomainList;
-    }
+  try {
+    chrome.storage.sync.get(DEFAULTS, function(rawOpts) {
+      // One guard around rule-building AND the updateDynamicRules call: a
+      // synchronous throw in either path must still reach finish() (the
+      // async callback below completes via its own finally block).
+      try {
+        const opts = { ...DEFAULTS, ...(rawOpts || {}) };
 
-    var addRules = [];
-
-    // Rule 2: Strip CSP only while image URL rewriting is enabled.
-    if (opts.enabled) {
-      addRules.push({
-        id: RULE_ID_CSP,
-        priority: 1,
-        action: {
-          type: "modifyHeaders",
-          responseHeaders: [
-            { header: "content-security-policy",             operation: "remove" },
-            { header: "content-security-policy-report-only", operation: "remove" }
-          ]
-        },
-        condition: condition
-      });
-    }
-
-    // Rule 3: Replaces the old MV2 webRequestBlocking implementation.
-    // DNR can safely set the request header in MV3 without blocking JavaScript.
-    if (opts.saveData) {
-      // IMPORTANT: urlFilter uses DNR's filter syntax, not a JavaScript
-      // regular expression. "^https?://" therefore does NOT mean "start of
-      // an http(s) URL" and the old rule never matched normal requests.
-      // Use regexFilter for an actual beginning-of-URL expression.
-      // Intentionally matches ALL request types: Save-Data is a document-wide
-      // client hint — servers may serve lower-data stylesheets, scripts and
-      // fonts as well as images, so restricting resourceTypes would weaken it.
-      var saveDataCondition = {
-        regexFilter: "^https?://"
-      };
-      if (excludedDomainList.length) {
-        saveDataCondition.excludedRequestDomains = excludedDomainList;
-        saveDataCondition.excludedInitiatorDomains = excludedDomainList;
-      }
-
-      addRules.push({
-        id: RULE_ID_SAVEDATA,
-        priority: 2,
-        action: {
-          type: "modifyHeaders",
-          requestHeaders: [
-            { header: "Save-Data", operation: "set", value: "on" }
-          ]
-        },
-        condition: saveDataCondition
-      });
-    }
-
-    chrome.declarativeNetRequest.updateDynamicRules(
-      { removeRuleIds: removeRuleIds, addRules: addRules },
-      function() {
-        if (chrome.runtime.lastError) {
-          console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", chrome.runtime.lastError.message);
+        // Excluded sites are never proxied, so they keep their own CSP. DNR rejects the
+        // whole update on an invalid domain, so only well-formed hostnames are passed.
+        const excluded = String(opts.excludeDomains || "").split(/[,\s]+/)
+          .map(function(s) { return s.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""); })
+          .filter(function(s) { return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(s); });
+        const excludedDomainList = Array.from(new Set(excluded));
+        const cspCondition = { resourceTypes: ["main_frame", "sub_frame"] };
+        if (excludedDomainList.length) {
+          // CSP follows the document/frame URL because content scripts decide by
+          // pageHost. A non-excluded frame or popup opened from an excluded site
+          // is still processed there, so preserving CSP by initiator would break
+          // its proxied images.
+          cspCondition.excludedRequestDomains = excludedDomainList;
         }
-        done();
+
+        const addRules = [];
+
+        // Rule 2: Strip CSP only while image URL rewriting is enabled.
+        if (opts.enabled) {
+          addRules.push({
+            id: RULE_ID_CSP,
+            priority: 1,
+            action: {
+              type: "modifyHeaders",
+              responseHeaders: [
+                { header: "content-security-policy",             operation: "remove" },
+                { header: "content-security-policy-report-only", operation: "remove" }
+              ]
+            },
+            condition: cspCondition
+          });
+        }
+
+        // Rule 3: Replaces the old MV2 webRequestBlocking implementation.
+        // DNR can safely set the request header in MV3 without blocking JavaScript.
+        if (opts.saveData) {
+          // IMPORTANT: urlFilter uses DNR's filter syntax, not a JavaScript
+          // regular expression. "^https?://" therefore does NOT mean "start of
+          // an http(s) URL" and the old rule never matched normal requests.
+          // Use regexFilter for an actual beginning-of-URL expression.
+          // Intentionally matches ALL request types: Save-Data is a document-wide
+          // client hint — servers may serve lower-data stylesheets, scripts and
+          // fonts as well as images, so restricting resourceTypes would weaken it.
+          const saveDataCondition = {
+            regexFilter: "^https?://"
+          };
+          if (excludedDomainList.length) {
+            saveDataCondition.excludedRequestDomains = excludedDomainList;
+            saveDataCondition.excludedInitiatorDomains = excludedDomainList;
+          }
+
+          addRules.push({
+            id: RULE_ID_SAVEDATA,
+            priority: 2,
+            action: {
+              type: "modifyHeaders",
+              requestHeaders: [
+                { header: "Save-Data", operation: "set", value: "on" }
+              ]
+            },
+            condition: saveDataCondition
+          });
+        }
+
+        chrome.declarativeNetRequest.updateDynamicRules(
+          { removeRuleIds: ALL_RULE_IDS, addRules: addRules },
+          function() {
+            try {
+              if (chrome.runtime.lastError) {
+                console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", chrome.runtime.lastError.message);
+              }
+            } finally {
+              finish();
+            }
+          }
+        );
+      } catch (error) {
+        console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", error);
+        finish();
       }
-    );
-  });
+    });
+  } catch (error) {
+    console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", error);
+    finish();
+  }
 }

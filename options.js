@@ -20,8 +20,10 @@ const customWidthEl   = $("customWidth");
 const qualityPresets = Array.from(document.querySelectorAll("#qualityPresets .preset"));
 const widthPresets   = Array.from(document.querySelectorAll("#widthPresets  .preset"));
 
-const QUALITY_PRESETS = [45, 60, 80];
-const WIDTH_PRESETS   = [768, 1024, 0];
+// Single source of truth for preset values: derive them from the buttons'
+// data-q / data-w attributes so the markup can never drift from the JS.
+const QUALITY_PRESETS = qualityPresets.map(b => Number(b.dataset.q));
+const WIDTH_PRESETS   = widthPresets.map(b => Number(b.dataset.w));
 // Last values loaded from storage, used to restore preset highlights when a
 // custom input is cleared (previously this wrongly restored DEFAULTS).
 let savedQuality = DEFAULTS.quality;
@@ -53,6 +55,18 @@ function fmtBytes(n) {
   return sign + abs + " B";
 }
 
+function toFiniteNumber(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
+
+function renderStats(stats = {}) {
+  const files = Number(stats.filesProcessed) || 0;
+  statImagesEl.textContent = files.toLocaleString();
+  statBytesEl.textContent  = fmtBytes(stats.bytesProcessed);
+  statSavedEl.textContent  = fmtBytes(stats.bytesSaved || 0);
+}
+
 async function reloadCurrentPage() {
   const isHttpUrl = url => /^https?:\/\//i.test(String(url || ""));
   try {
@@ -60,7 +74,7 @@ async function reloadCurrentPage() {
     // (most recently accessed HTTP(S) tab), halving the round-trips.
     const tabs = await chrome.tabs.query({ currentWindow: true });
     const active = tabs.find(t => t.active);
-    if (active?.id && isHttpUrl(active.url)) {
+    if (active?.id != null && isHttpUrl(active.url)) {
       await chrome.tabs.reload(active.id);
       return;
     }
@@ -78,6 +92,7 @@ async function reloadCurrentPage() {
 
 // Quality presets: highlight the button whose value matches, or none for custom.
 function setQualityUI(q) {
+  q = Number(q);
   qualityPresets.forEach(b => b.classList.toggle("active", Number(b.dataset.q) === q));
   // Keep custom field in sync
   if (!QUALITY_PRESETS.includes(q)) {
@@ -89,6 +104,7 @@ function setQualityUI(q) {
 
 // Width presets: same pattern.
 function setWidthUI(w) {
+  w = Number(w);
   widthPresets.forEach(b => b.classList.toggle("active", Number(b.dataset.w) === w));
   if (!WIDTH_PRESETS.includes(w)) {
     customWidthEl.value = w;
@@ -116,34 +132,64 @@ function readWidth() {
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 async function load() {
-  const [d, s] = await Promise.all([
-    chrome.storage.sync.get(DEFAULTS),
-    chrome.storage.local.get({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } })
-  ]);
+  let d, s;
+  try {
+    [d, s] = await Promise.all([
+      chrome.storage.sync.get(DEFAULTS),
+      chrome.storage.local.get({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } })
+    ]);
+  } catch {
+    // A rejected storage read must not leave the settings page stuck on
+    // placeholders — fall back to the shared defaults and empty statistics
+    // (same hardening as the popup's load()).
+    d = { ...DEFAULTS };
+    s = { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } };
+  }
   enabledEl.checked   = !!d.enabled;
   grayscaleEl.checked = !!d.grayscale;
   saveDataEl.checked   = !!d.saveData;
   excludeEl.value     = d.excludeDomains || "";
-  savedQuality = d.quality  ?? DEFAULTS.quality;
-  savedWidth   = d.maxWidth ?? DEFAULTS.maxWidth;
+  savedQuality = toFiniteNumber(d.quality ?? DEFAULTS.quality, DEFAULTS.quality);
+  savedWidth   = toFiniteNumber(d.maxWidth ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth);
   setQualityUI(savedQuality);
   setWidthUI(savedWidth);
-
-  const st = s.stats || {};
-  statImagesEl.textContent = (st.filesProcessed || 0).toLocaleString();
-  statBytesEl.textContent  = fmtBytes(st.bytesProcessed);
-  statSavedEl.textContent  = fmtBytes(st.bytesSaved || 0);
+  renderStats(s.stats);
 }
 load();
+
+// Keep the page synchronized with changes made in the popup, reset flows, or
+// service-worker statistics flushes while this tab remains open.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "sync") {
+    if ("enabled" in changes) {
+      enabledEl.checked = !!(changes.enabled.newValue ?? DEFAULTS.enabled);
+    }
+    if ("grayscale" in changes) {
+      grayscaleEl.checked = !!(changes.grayscale.newValue ?? DEFAULTS.grayscale);
+    }
+    if ("saveData" in changes) {
+      saveDataEl.checked = !!(changes.saveData.newValue ?? DEFAULTS.saveData);
+    }
+    if ("excludeDomains" in changes) {
+      excludeEl.value = String(changes.excludeDomains.newValue ?? DEFAULTS.excludeDomains);
+    }
+    if ("quality" in changes) {
+      savedQuality = toFiniteNumber(changes.quality.newValue ?? DEFAULTS.quality, DEFAULTS.quality);
+      setQualityUI(savedQuality);
+    }
+    if ("maxWidth" in changes) {
+      savedWidth = toFiniteNumber(changes.maxWidth.newValue ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth);
+      setWidthUI(savedWidth);
+    }
+  } else if (area === "local" && changes.stats) {
+    renderStats(changes.stats.newValue || {});
+  }
+});
 
 // ── Quality preset buttons ────────────────────────────────────────────────────
 
 qualityPresets.forEach(btn => {
-  btn.addEventListener("click", () => {
-    qualityPresets.forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    customQualityEl.value = ""; // preset takes priority; clear custom
-  });
+  btn.addEventListener("click", () => setQualityUI(Number(btn.dataset.q)));
 });
 
 // Custom quality input — deselects all presets when user types a value.
@@ -160,11 +206,7 @@ customQualityEl.addEventListener("input", () => {
 // ── Max-width preset buttons ──────────────────────────────────────────────────
 
 widthPresets.forEach(btn => {
-  btn.addEventListener("click", () => {
-    widthPresets.forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    customWidthEl.value = "";
-  });
+  btn.addEventListener("click", () => setWidthUI(Number(btn.dataset.w)));
 });
 
 customWidthEl.addEventListener("input", () => {
@@ -181,22 +223,54 @@ customWidthEl.addEventListener("input", () => {
 
 enabledEl.addEventListener("change", async () => {
   const enabled = !!enabledEl.checked;
-  await chrome.storage.sync.set({ enabled });
+  try {
+    await chrome.storage.sync.set({ enabled });
+  } catch {
+    enabledEl.checked = !enabled;
+    showToast("Couldn't update compression", "err");
+    return;
+  }
   await reloadCurrentPage();
   showToast(enabled ? "Compression enabled" : "Compression disabled", "ok");
 });
 
 grayscaleEl.addEventListener("change", async () => {
-  await chrome.storage.sync.set({ grayscale: !!grayscaleEl.checked });
+  const grayscale = !!grayscaleEl.checked;
+  try {
+    await chrome.storage.sync.set({ grayscale });
+  } catch {
+    grayscaleEl.checked = !grayscale;
+    showToast("Couldn't update grayscale", "err");
+    return;
+  }
   showToast("Reload the page to apply", "warn");
 });
 
 saveDataEl.addEventListener("change", async () => {
-  await chrome.storage.sync.set({ saveData: !!saveDataEl.checked });
-  showToast(saveDataEl.checked ? "Save-Data header enabled" : "Save-Data header disabled", "ok");
+  const saveData = !!saveDataEl.checked;
+  try {
+    await chrome.storage.sync.set({ saveData });
+  } catch {
+    saveDataEl.checked = !saveData;
+    showToast("Couldn't update Save-Data", "err");
+    return;
+  }
+  showToast(saveData ? "Save-Data header enabled" : "Save-Data header disabled", "ok");
 });
 
 // ── Save ──────────────────────────────────────────────────────────────────────
+
+// Compare exclusion lists by effect, not spelling: separator style, whitespace,
+// casing, duplicates, and entry order don't change which sites are skipped, so
+// they must not force a page reload.
+function normalizeDomainsKey(text) {
+  return Array.from(new Set(
+    String(text || "")
+      .split(/[,\s]+/)
+      .map(s => s.trim().toLowerCase()).filter(Boolean)
+      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
+  )).sort().join(" ");
+}
 
 async function save() {
   // Reject invalid custom values instead of silently falling back to a preset.
@@ -213,19 +287,26 @@ async function save() {
   const quality = readQuality();
   const maxWidth = readWidth();
   const excludeDomains = (excludeEl.value || "").trim();
-  const current = await chrome.storage.sync.get(DEFAULTS);
-
-  await chrome.storage.sync.set({
-    quality,
-    maxWidth,
-    excludeDomains,
-  });
+  let current;
+  try {
+    current = await chrome.storage.sync.get(DEFAULTS);
+    await chrome.storage.sync.set({
+      quality,
+      maxWidth,
+      excludeDomains,
+    });
+  } catch {
+    showToast("Couldn't save settings", "err");
+    return;
+  }
 
   // Reload whenever a URL-shaping setting changed (quality, max width, or the
   // exclusion list) — exclusion changes only take effect on a fresh page load.
-  if (quality  !== Number(current.quality  ?? DEFAULTS.quality) ||
-      maxWidth !== Number(current.maxWidth ?? DEFAULTS.maxWidth) ||
-      excludeDomains !== String(current.excludeDomains ?? DEFAULTS.excludeDomains)) {
+  const previousQuality = toFiniteNumber(current.quality ?? DEFAULTS.quality, DEFAULTS.quality);
+  const previousMaxWidth = toFiniteNumber(current.maxWidth ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth);
+  if (quality !== previousQuality ||
+      maxWidth !== previousMaxWidth ||
+      normalizeDomainsKey(excludeDomains) !== normalizeDomainsKey(current.excludeDomains)) {
     await reloadCurrentPage();
   }
 
@@ -240,15 +321,21 @@ async function save() {
 // ── Reset ─────────────────────────────────────────────────────────────────────
 
 async function resetAll() {
-  const current = await chrome.storage.sync.get(DEFAULTS);
-  await chrome.storage.sync.set(DEFAULTS);
+  let current;
+  try {
+    current = await chrome.storage.sync.get(DEFAULTS);
+    await chrome.storage.sync.set(DEFAULTS);
+  } catch {
+    showToast("Couldn't reset settings", "err");
+    return;
+  }
   await load();
 
   const affectsCurrentPage =
     !!current.enabled !== DEFAULTS.enabled ||
-    Number(current.quality ?? DEFAULTS.quality) !== DEFAULTS.quality ||
-    Number(current.maxWidth ?? DEFAULTS.maxWidth) !== DEFAULTS.maxWidth ||
-    String(current.excludeDomains ?? DEFAULTS.excludeDomains) !== DEFAULTS.excludeDomains ||
+    toFiniteNumber(current.quality ?? DEFAULTS.quality, DEFAULTS.quality) !== DEFAULTS.quality ||
+    toFiniteNumber(current.maxWidth ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth) !== DEFAULTS.maxWidth ||
+    normalizeDomainsKey(current.excludeDomains ?? DEFAULTS.excludeDomains) !== normalizeDomainsKey(DEFAULTS.excludeDomains) ||
     !!current.grayscale !== DEFAULTS.grayscale;
   if (affectsCurrentPage) await reloadCurrentPage();
   showToast("Reset to defaults");

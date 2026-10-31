@@ -19,17 +19,19 @@
 - **JSON/DOM-event settings bridge** from isolated `content.js` to MAIN-world `prehook.js`.
 - **Temporary parking** of page-created images, `srcset`, image preloads, and loading assignments until settings arrive.
 - **Normal images and `srcset`** including `<picture>` / `<source>` candidates.
-- **Lazy-loading attributes:** `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset`.
-- **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`. The MAIN-world hook rewrites or parks URLs before activating a preload when possible, and restores the original URL if the link is repurposed.
+- **Lazy-loading attributes:** `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset` — rewritten **only** on `<img>` and `<picture><source>` elements. Generic elements are left untouched (their `data-*` payloads can be video, pages, or scripts), and media `<source>` elements inside `<video>`/`<audio>` pass through untouched, including while settings are still loading.
+- **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`. The MAIN-world hook rewrites or parks URLs before activating a preload when possible. Both layers retain the original URL and restore it if the link is repurposed, including preloads the MAIN-world hook parked on `about:blank` with the original stashed in `data-bh-preload-href` while settings were loading. The isolated layer never restores a parked preload before settings are known, so parking cannot be undone early by a mutation batch racing the storage read.
 - **Inline CSS backgrounds:** best-effort rewriting of HTTP(S) `url(...)` values in inline `background-image`.
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
 - **Per-image proxy fallback:** failed proxy image loads restore the saved original URL, ignore immediate retries of the same failed proxy URL, and allow the element to be reused for a different image.
 - **Configurable quality, grayscale, maximum width, and excluded domains.**
+- **Consistent exclusion parsing:** excluded domains accept space, comma, or any whitespace separation; optional schemes/paths, leading dots, and trailing dots are normalized identically in the popup, isolated content script, MAIN-world prehook, and DNR rule code.
 - **Double-proxy protection:** wsrv.nl URLs are never wrapped again.
-- **Bounded URL/cache work:** proxy URL caches are capped and srcset work is cached per element.
+- **Bounded URL/cache work:** proxy URL caches are capped, srcset work is cached per element, the device-pixel-ratio clamp is computed once per settings change, ambiguous lazy attributes on generic non-image elements are dropped before URL resolution, and elements with nothing left to rewrite stay marked done so full-page rescans skip them.
 - **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup. Partial/older mirrors are merged with the shared defaults before use.
-- **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms; resetting statistics clears the worker's pending batch and waits out an in-flight flush.
-- **CSP handling:** Declarative Net Request removes CSP response headers on eligible page/frame requests while image compression is enabled.
+- **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms; resetting statistics clears the worker's pending batch and waits out an in-flight flush. Storage failures release the worker's internal locks without dropping the in-memory batch or leaving later settings updates stuck; storage callbacks that are silently dropped are covered by watchdog timers on the mirror, flush, reset, and DNR rule-refresh guards.
+- **Live settings updates:** an open settings page follows synced setting changes, resets, and newly flushed statistics.
+- **CSP handling:** Declarative Net Request removes CSP response headers for eligible page/frame URLs while image compression is enabled, including non-excluded frames and popups opened from excluded sites.
 - **Independent Save-Data hint:** the optional `Save-Data: on` request header remains active when enabled, even if image compression is turned off.
 - **Reproducible build:** `build.sh` validates, stages, timestamps, packages, and verifies the extension deterministically.
 
@@ -46,6 +48,11 @@ Grayscale:          true
 Fallback to origin: enabled (failed proxy images restore the original URL once)
 Excluded domains:   empty
 ```
+
+Stored settings are normalized before use: an invalid quality value falls back
+to `60` and an invalid max-width value falls back to `768` (the shared
+defaults), so a corrupt legacy value can never silently widen the compression
+settings. Fractional numeric values are truncated to integers.
 
 The proxy URL is fixed to:
 
@@ -108,14 +115,14 @@ __BANDWIDTH_SAVER_SETTINGS__
 
 No JavaScript object, storage object, or `chrome.*` API crosses the world boundary.
 
-The service worker maintains the `bhOpts` local mirror from `storage.sync`. If the mirror is missing, `content.js` falls back to `storage.sync`, writes the mirror, and publishes the settings. Both worlds merge incoming settings with the shared defaults so a partial mirror from an older version does not prevent the MAIN-world hooks from becoming ready.
+The service worker maintains the `bhOpts` local mirror from `storage.sync`. If the mirror is missing, `content.js` falls back to `storage.sync`, writes the mirror, and publishes the settings. A short failsafe timer is registered before the first storage read and publishes the shared defaults when neither storage read returns, so a synchronous storage failure or delayed callback cannot strand images parked on `about:blank`. Both worlds merge incoming settings with the shared defaults so a partial mirror from an older version does not prevent the MAIN-world hooks from becoming ready.
 
 ### `content.js` — ISOLATED world
 
 This layer handles work the MAIN-world hooks cannot see directly, especially parser-created DOM resources and broad DOM scanning:
 
 - parser-created `<img src>` and `srcset`
-- `<source srcset>`
+- `<picture><source srcset>`
 - lazy `data-*` attributes
 - `data-srcset`
 - inline `background-image`
@@ -135,11 +142,16 @@ When the MAIN-world layer changes an image to a proxy URL, it retains the origin
 
 This prevents a failed proxy request from becoming a permanent broken image while avoiding an immediate proxy loop.
 
+On elements carrying multiple lazy attributes, the original preserved for
+restore is the first one remembered — normally the true `<img src>` — never a
+later lazy-attribute rewrite.
+
 ### Keeping the shared code identical
 
 Because MAIN-world scripts cannot import modules, the helpers both worlds
-need (`parseSrcset`, `buildProxyUrl`, the skip rules, and the shared
-constants) are duplicated between `content.js` and `prehook.js`. `build.sh`
+need (`WSRV_PROXY`, `TINY_DIM_RE`, `parseSrcset`, `buildProxyUrl`,
+`updateProxyConfig`, the settings-comparison `sameOpts()`, and the shared
+`DEFAULTS`) are duplicated between `content.js` and `prehook.js`. `build.sh`
 fails the build if the duplicated pieces drift apart — always apply shared
 fixes to both files.
 
@@ -176,7 +188,7 @@ The URL classifier skips:
 
 - non-HTTP(S) resources such as `data:` and `blob:`
 - already-proxied `wsrv.nl` URLs
-- excluded domains and their subdomains
+- excluded domains (after domain normalization) and their subdomains
 - SVG URLs and icon/favicon URLs
 - URLs with tiny dimensions (≤ 32) in common width/height query parameters
 
@@ -190,7 +202,7 @@ The settings page shows:
 - **Proxy bytes:** the sum of `Content-Length`, representing processed image bytes delivered to the browser
 - **Bytes saved:** the sum of `X-Upstream-Response-Length - Content-Length` for responses where both headers contain valid non-negative byte counts
 
-`X-Upstream-Response-Length` represents the number of bytes wsrv.nl received from the original image server; `Content-Length` represents the processed response size delivered by wsrv.nl. For example, 100,000 upstream bytes and 30,000 delivered bytes means 70,000 bytes saved (70%). Savings are an estimate for observed individual responses, not total account usage. If the custom upstream header is missing, that response contributes to image/proxy-byte totals but not to the savings total. Savings can be negative when the processed image is larger than its source. Browser JavaScript CORS visibility is separate from this extension statistic: the extension reads response headers through the browser extension `webRequest` API.
+`X-Upstream-Response-Length` represents the number of bytes wsrv.nl received from the original image server; `Content-Length` represents the processed response size delivered by wsrv.nl. For example, 100,000 upstream bytes and 30,000 delivered bytes means 70,000 bytes saved (70%). Savings are an estimate for observed individual responses, not total account usage. If the custom upstream header is missing, that response contributes to image/proxy-byte totals but not to the savings total. Savings can be negative when the processed image is larger than its source. Browser JavaScript CORS visibility is separate from this extension statistic: the extension reads response headers through the browser extension `webRequest` API. Headers delivered only as raw bytes (`binaryValue`, with no string `value`) are decoded before parsing.
 
 ## ⚙️ Settings and UI
 
@@ -214,7 +226,7 @@ The settings page provides:
 - quality presets or custom 1–100
 - maximum-width presets or custom values ≥ 0
 - excluded domains
-- statistics and reset
+- statistics and reset, with live updates while the page is open
 - reset-to-defaults
 
 Quality, width, enable/disable, reset-to-defaults, and excluded-domain changes reload the active HTTP(S) page when needed. Grayscale changes show a reload prompt because already-loaded proxy images cannot be recoloured in place. Existing resources are not retroactively guaranteed to change without a reload. Save-Data changes apply to subsequent HTTP(S) requests without requiring a page reload, and the header setting remains independent of whether image compression is enabled.
@@ -224,10 +236,9 @@ Quality, width, enable/disable, reset-to-defaults, and excluded-domain changes r
 From `manifest.json`:
 
 - `storage` — settings, local mirror, and statistics
-- `tabs` — active-tab URL lookup and reload
 - `declarativeNetRequestWithHostAccess` — CSP response-header removal and Save-Data request-header modification
 - `webRequest` — read-only observation of wsrv.nl image responses for statistics
-- `<all_urls>` host access — required for document-start interception on websites
+- `<all_urls>` host access — required for document-start interception on websites; also exposes active-tab URLs to the popup/settings reload helpers (no `tabs` permission needed)
 
 ## 📦 Installation
 
@@ -239,9 +250,12 @@ From `manifest.json`:
 3. Enable Developer mode.
 4. Load the project directory as an unpacked extension.
 
-This extension is Chromium-only. The manifest uses a classic callback-based
-service worker (not an ES module) so it also runs on Chromium-derived mobile
-browsers such as Kiwi/Cromite.
+This extension is Chromium-only and requires **Chrome 111 or newer**. The
+manifest declares `minimum_chrome_version: "111"` because MAIN-world content
+scripts (the early-interception layer) are only supported from Chrome 111 —
+older builds would silently skip `prehook.js` and run half-functional. The
+manifest uses a classic callback-based service worker (not an ES module) so it
+also runs on Chromium-derived mobile browsers such as Kiwi/Cromite.
 
 ## 🏗️ Build
 
@@ -253,7 +267,7 @@ The script:
 
 1. reads the version from `manifest.json`;
 2. validates JavaScript syntax;
-3. verifies the duplicated proxy URL, tiny-dimension pattern, `srcset` parser, and proxy URL builder in `content.js` and `prehook.js`, plus checks that all four `DEFAULTS` copies match;
+3. verifies the duplicated proxy URL, tiny-dimension pattern, `srcset` parser, proxy URL builder, and settings-normalization helper in `content.js` and `prehook.js`, plus checks that all four `DEFAULTS` copies match;
 4. stages only files required by the manifest/package;
 5. verifies manifest references;
 6. applies a fixed `SOURCE_DATE_EPOCH`;
@@ -287,7 +301,7 @@ bandwidth-saver/
 ├── defaults.js
 ├── prehook.js             # MAIN-world synchronous interception
 ├── content.js             # ISOLATED-world storage + DOM processing
-├── service-worker.js      # settings mirror, icon, stats, DNR CSP rule
+├── service-worker.js      # settings mirror, icon, stats, DNR CSP + Save-Data rules
 ├── popup.html / popup.js
 ├── options.html / options.js
 ├── icons/
@@ -310,9 +324,7 @@ See `LICENSE` and the source files for applicable third-party licensing and attr
 
 ## 🔗 Related projects (not part of this repository)
 
-The services below are maintained separately and are **not** part of this
-repository, its build pipeline, or its release cycle. They are listed here for
-convenience only; listing them does not configure the browser to use them.
+The services below are maintained separately and are **not** part of this repository, its build pipeline, or its release cycle. They are listed here for convenience only.
 
 ### 🌐 Free DNS Services
 
@@ -329,12 +341,9 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 
 ### ⚡ Bandwidth Hero Server
 
-A lightweight image optimization proxy designed to slash bandwidth usage and
-accelerate web browsing.
+A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
 
-Bandwidth Hero Server fetches remote images, compresses them on the fly, and
-delivers optimized versions to the client. This significantly reduces data
-consumption while improving page load performance.
+Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
 
 🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
 
@@ -346,4 +355,4 @@ If you find this project useful, donations are appreciated:
 
 ## License
 
-See [`LICENSE`](LICENSE).
+See [`LICENSE`](LICENSE). Recent changes are listed in [`CHANGELOG.md`](CHANGELOG.md).

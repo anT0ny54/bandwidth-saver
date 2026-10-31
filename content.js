@@ -58,6 +58,9 @@
 
   let opts = null;
   let proxyConfig = null;
+  // Clamped once per applyOpts(); devicePixelRatio only changes on zoom or
+  // monitor moves, so it must not be re-computed on every uncached URL build.
+  let dpr = 1;
   let destroyed = false;      // set on real navigation away from this document
   const proxyUrlCache = new Map();
   const PROXY_CACHE_LIMIT = 512;
@@ -71,6 +74,16 @@
   const RESTORED_SRCSET_ATTR = "data-bw-restored-srcset";
   const FAILED_PROXY_SRC_ATTR = "data-bw-failed-proxy-src";
   const FAILED_PROXY_SRCSET_ATTR = "data-bw-failed-proxy-srcset";
+  const ORIGINAL_PRELOAD_HREF_ATTR = "data-bw-original-preload-href";
+  const APPLIED_PRELOAD_HREF_ATTR = "data-bw-applied-preload-href";
+  // Shared pattern for inline background-image url(...) tokens; safe to reuse
+  // (String.replace always starts global regexes from index 0 and resets
+  // lastIndex afterwards).
+  const BG_URL_RE = /url\(\s*(?:(['"])(.*?)\1|([^)]*?))\s*\)/gi;
+  // Written by prehook.js (MAIN world) while a preload href is parked on
+  // about:blank; the isolated layer must clear it on restore too, or a stale
+  // stash could re-park the link later.
+  const PENDING_PRELOAD_HREF_ATTR = "data-bh-preload-href";
   let excludedDomains = new Set();
   // Single source of truth: derive from WSRV_PROXY so a proxy change only
   // ever needs one edit.
@@ -96,7 +109,6 @@
     const resolved = safeURL(u);
     return resolved && /^https?:$/.test(resolved.protocol) ? resolved : null;
   };
-  const isHttp  = u => /^https?:\/\//i.test(u);
 
   // Conservative URL-only skips. Never inspect/load the original image just
   // to determine its dimensions. This pattern targets obvious tiny assets
@@ -108,7 +120,7 @@
     return new Set(
       String(text || "").split(/[,\s]+/)
         .map(s => s.trim().toLowerCase()).filter(Boolean)
-        .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/\.$/, ""))
+        .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
     );
   }
 
@@ -129,14 +141,13 @@
     // Fast string exits. These checks run for every candidate image.
     // Keep them conservative so valid image URLs are never skipped accidentally.
     if (pageExcluded) return true;
-    const lower = u.href.toLowerCase();
 
     // Already proxied (hostname check covers scheme/case/port variations).
     if (u.hostname === proxyHost) return true; // URL.hostname is already lowercase
-    if (lower.includes("favicon")) return true;
-    if (lower.endsWith(".ico") || lower.includes(".ico?") || lower.includes(".ico#") ||
-        lower.endsWith(".svg") || lower.includes(".svg?") || lower.includes(".svg#")) return true;
-    if (isTiny(lower)) return true;
+    const href = u.href;
+    if (/favicon/i.test(href)) return true;
+    if (/\.(?:ico|svg)(?:[?#]|$)/i.test(href)) return true;
+    if (isTiny(href)) return true;   // TINY_DIM_RE is already case-insensitive
 
     // Excluded image host, including subdomains.
     if (excludedHost(u.hostname)) return true;
@@ -151,21 +162,35 @@
     // Merge defaults before publishing to the MAIN world so one missing field
     // cannot leave its early-interception hooks parked on about:blank.
     opts = { ...DEFAULTS, ...(next && typeof next === "object" ? next : {}) };
-    const base = WSRV_PROXY;
     // ?? catches null/undefined; Number.isFinite catches NaN. Crucially, 0
     // stays 0 so Math.max(1, …) clamps it to 1 — the old `|| 60` turned 0
     // into 60 and silently bypassed the clamp.
+    // Invalid maxWidth values fall back to DEFAULTS.maxWidth rather than
+    // 0: a corrupt legacy value must not silently disable the width cap.
     const rawQuality = Number(opts.quality ?? DEFAULTS.quality);
     const quality = Math.max(1, Math.min(100,
       Number.isFinite(rawQuality) ? Math.trunc(rawQuality) : DEFAULTS.quality));
-    const maxWidth = Number(opts.maxWidth) || 0;
-    proxyConfig = { base, quality,
-      maxWidth: maxWidth > 0 ? maxWidth : 0, grayscale: !!opts.grayscale };
+    const rawMaxWidth = Number(opts.maxWidth ?? DEFAULTS.maxWidth);
+    const maxWidth = Number.isFinite(rawMaxWidth)
+      ? Math.max(0, Math.trunc(rawMaxWidth))
+      : DEFAULTS.maxWidth;
+    // Store the normalized values back on the merged snapshot. That keeps
+    // settings comparisons exact and prevents legacy string values from
+    // repeatedly invalidating caches or looking like a settings change.
+    opts.enabled = !!opts.enabled;
+    opts.saveData = !!opts.saveData;
+    opts.grayscale = !!opts.grayscale;
+    opts.fallbackToOrigin = !!opts.fallbackToOrigin;
+    opts.excludeDomains = String(opts.excludeDomains ?? DEFAULTS.excludeDomains);
+    opts.quality = quality;
+    opts.maxWidth = maxWidth;
+    proxyConfig = { base: WSRV_PROXY, quality, maxWidth, grayscale: opts.grayscale };
   }
 
   function applyOpts(next) {
     const wasEnabled = !!opts?.enabled;
     updateProxyConfig(next);
+    dpr = Math.min(2, Math.max(1, Number(globalThis.devicePixelRatio) || 1));
     srcsetCache = new WeakMap();
     dataSrcsetCache = new WeakMap();
     proxyUrlCache.clear();
@@ -181,11 +206,25 @@
     }));
   }
 
-  const sameOpts = (a, b) => !!a && !!b && ["enabled", "saveData", "quality", "grayscale", "maxWidth", "excludeDomains", "fallbackToOrigin"]
-    .every(k => a[k] === b[k]);
+  // saveData is header-only state (DNR rule 3, owned by the service worker);
+  // neither this layer nor the MAIN world reads it, so a Save-Data-only
+  // change must not invalidate the proxy URL and srcset caches.
+  // KEEP IN SYNC with prehook.js.
+  const domainKey = text => Array.from(new Set(
+    String(text || "").split(/[,\s]+/)
+      .map(s => s.trim().toLowerCase()).filter(Boolean)
+      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
+  )).sort().join(" ");
+  const sameOpts = (a, b) => !!a && !!b &&
+    a.enabled === b.enabled &&
+    a.quality === b.quality &&
+    a.grayscale === b.grayscale &&
+    a.maxWidth === b.maxWidth &&
+    a.fallbackToOrigin === b.fallbackToOrigin &&
+    domainKey(a.excludeDomains) === domainKey(b.excludeDomains);
 
   function buildProxyUrl(orig) {
-    if (!proxyConfig || !isHttp(orig)) return orig;
+    if (!proxyConfig) return orig;
 
     const cached = proxyUrlCache.get(orig);
     if (cached) {
@@ -204,9 +243,8 @@
     ];
 
     if (maxWidth) {
-      // Preserve aspect ratio and never enlarge smaller images. Limit DPR to 2
-      // so high-density displays do not silently double the requested pixels again.
-      const dpr = Math.min(2, Math.max(1, Number(globalThis.devicePixelRatio) || 1));
+      // Preserve aspect ratio and never enlarge smaller images. dpr was clamped
+      // in applyOpts() so high-density displays don't double-request pixels.
       parts.push("w=" + maxWidth, "fit=inside", "we=1", "dpr=" + dpr);
     }
 
@@ -216,6 +254,9 @@
 
     // Keep animated/multi-page inputs intact and use a longer browser cache to
     // reduce repeat downloads while retaining a bounded freshness window.
+    // default=1 asks wsrv.nl to fall back to the source image if its own
+    // processing fails; the browser-side data-bw-restored fallback is a second
+    // fallback for a failed proxy image request.
     parts.push("maxage=1d", "page=-1", "n=-1", "default=1", "output=webp");
 
     const result = base + "?" + parts.join("&");
@@ -259,6 +300,10 @@
 
   function restoreOriginalImage(el) {
     if (!opts?.fallbackToOrigin || !el || el.nodeType !== 1) return false;
+    // Decide eligibility before touching any state: an element that cannot
+    // be restored must not be left marked data-bw-restored or in the done
+    // sets (only IMG/SOURCE can carry the saved original attributes).
+    if (el.tagName !== "IMG" && el.tagName !== "SOURCE") return false;
 
     // An <img> inside <picture> may be loading a candidate from a sibling
     // <source>, so the failed proxy URL and saved original can live on that
@@ -309,11 +354,10 @@
         if (nativeImgSrcSetter) nativeImgSrcSetter.call(el, src);
         else el.setAttribute("src", src);
       }
-    } else if (el.tagName === "SOURCE") {
+    } else {
+      // <SOURCE>: tagName was validated above, so this branch is the only one left.
       if (srcset) el.setAttribute("srcset", srcset);
       if (src) el.setAttribute("src", src);
-    } else {
-      return false;
     }
     el.removeAttribute(ORIGINAL_SRC_ATTR);
     el.removeAttribute(ORIGINAL_SRCSET_ATTR);
@@ -360,9 +404,8 @@
       el.setAttribute("loading", "lazy");
     }
 
-    let rewrote = false;
-
-    if (el.tagName === "IMG" || el.tagName === "SOURCE") {
+    if (el.tagName === "IMG" ||
+        (el.tagName === "SOURCE" && el.parentElement?.tagName === "PICTURE")) {
       // src
       if (el.tagName === "IMG") {
         const src = el.getAttribute("src");
@@ -372,22 +415,31 @@
           // through the MAIN-world prehook.
           rememberOriginal(el, u.href, null);
           nativeImgSrcSetter.call(el, buildProxyUrl(u.href));
-          rewrote = true;
+        }
+      } else {
+        // Enclosing if already established <picture><source>: parser-created
+        // <source src> bypasses prehook's property
+        // patch, so handle it here like <img src>. Restrict to <picture>
+        // parents so media <source> elements are never treated as images.
+        const src = el.getAttribute("src");
+        const u = src ? resolveImage(src) : null;
+        if (u && !shouldSkip(u)) {
+          rememberOriginal(el, u.href, null);
+          el.setAttribute("src", buildProxyUrl(u.href));
         }
       }
 
-      // srcset — cache the last value for this element.
+      // srcset — cache the last value for this element. Setting the same
+      // value is a no-op attribute write; the srcset cache already short-
+      // circuits rewrites of identical input.
       const ss = el.getAttribute("srcset");
-      if (ss) {
-        const output = rewriteSrcsetValue(ss, el, srcsetCache);
-        if (output !== ss) {
-          el.setAttribute("srcset", output);
-          rewrote = true;
-        }
-      }
+      if (ss) el.setAttribute("srcset", rewriteSrcsetValue(ss, el, srcsetCache));
     }
 
-    if (rewrote) doneImg.add(el);
+    // Mark done even when nothing was rewriteable (parity with rewriteBg):
+    // skipped/absent URLs can't become eligible without a mutation, and every
+    // real change path deletes the element from doneImg before reprocessing.
+    doneImg.add(el);
   }
 
   // ── B) Lazy-attr rewriting ─────────────────────────────────────────────────
@@ -406,35 +458,45 @@
     // elements and are also used for iframe/video/script/navigation URLs.
     // Only proxy lazy attributes when the element is an actual image source
     // element. CSS background images are handled separately by rewriteBg().
-    if (el.tagName !== "IMG" && el.tagName !== "SOURCE") return;
-
-    let rewrote = false;
+    if (el.tagName !== "IMG" && el.tagName !== "SOURCE") {
+      // Tag names never change, so generic elements matched only by
+      // LAZY_SELECTOR can be retired immediately. Without this mark, every
+      // forced reconcile re-resolves the same non-image data-* URL before
+      // returning here unchanged.
+      doneLazy.add(el);
+      return;
+    }
+    // A <source> outside <picture> is a media (video/audio) source, not an
+    // image candidate — never proxy its lazy attributes (parity with the
+    // src/srcset hooks in prehook.js, which are PICTURE-restricted).
+    if (el.tagName === "SOURCE" && el.parentElement?.tagName !== "PICTURE") return;
 
     // Inspect only attributes that actually exist instead of calling
     // getAttribute() for every possible lazy attribute on every element.
-    for (const attr of el.attributes) {
+    for (const attr of Array.from(el.attributes)) {
       if (!lazyAttrSet.has(attr.name)) continue;
       const val = attr.value;
       const u = val ? resolveImage(val) : null;
       if (!u || NON_IMAGE_EXT_RE.test(u.href) || shouldSkip(u)) continue;
       // LAZY_ATTRS never contains a srcset attribute (data-srcset is handled
       // separately below), so only the original src is remembered here.
-      rememberOriginal(el, u.href, null);
+      // Preserve the FIRST remembered original: an element can carry several
+      // lazy attributes pointing at different images (e.g. data-src +
+      // data-hi-res), and a later lazy URL must never displace the true
+      // original saved for proxy-failure restore. rewriteImg() runs before
+      // this and its remembered <img src> original survives this guard.
+      if (!el.getAttribute(ORIGINAL_SRC_ATTR)) rememberOriginal(el, u.href, null);
       el.setAttribute(attr.name, buildProxyUrl(u.href));
-      rewrote = true;
     }
 
     // data-srcset — same per-element cache as normal srcset.
     const dss = el.getAttribute("data-srcset");
-    if (dss) {
-      const output = rewriteSrcsetValue(dss, el, dataSrcsetCache);
-      if (output !== dss) {
-        el.setAttribute("data-srcset", output);
-        rewrote = true;
-      }
-    }
+    if (dss) el.setAttribute("data-srcset", rewriteSrcsetValue(dss, el, dataSrcsetCache));
 
-    if (rewrote) doneLazy.add(el);
+    // Same re-arm as rewriteImg: nothing rewriteable right now still marks
+    // the element done; a later attribute change arrives as a mutation that
+    // deletes it from doneLazy first.
+    doneLazy.add(el);
   }
 
   // ── C) Inline background-image rewriting ──────────────────────────────────
@@ -446,40 +508,103 @@
     if (el.getAttribute(RESTORED_ATTR) === "1") return; // failed proxy: keep the restored original
     if (!opts?.enabled) return;
     const bg = el.style?.backgroundImage;
-    if (!bg) return;
+    // Mark done even without a background-image: elements matched by the
+    // [style*='url(' i] selector can carry url(...) in non-background
+    // properties (cursor, border-image, list-style). Without this they were
+    // re-parsed on every mutation batch for the life of the page. A later
+    // style change arrives as a mutation that deletes the element from
+    // doneBg before reprocessing, so marking it done here is safe.
+    if (!bg) { doneBg.add(el); return; }
 
     // Rewrite every HTTP(S) url(...) token while preserving gradients, CSS
     // variables, quoted URLs, and non-HTTP resources.
-    const urlRe = /url\(\s*(?:(['"])(.*?)\1|([^)]*?))\s*\)/gi;
     let touched = false;
-    const output = bg.replace(urlRe, (full, quote, quoted, bare) => {
+    const output = bg.replace(BG_URL_RE, (full, quote, quoted, bare) => {
       const raw = String(quote ? quoted : bare || "").trim();
       const u = raw ? resolveImage(raw) : null;
       if (!u || shouldSkip(u)) return full;
       touched = true;
       return `url("${buildProxyUrl(u.href)}")`;
     });
-    if (!touched || output === bg) return;
-    el.style.backgroundImage = output;
+    if (touched && output !== bg) {
+      el.style.backgroundImage = output;
+    }
+    // Re-mark done either way so unrelated later style mutations don't re-run
+    // the regex on every batch. A real change to background-image arrives as a
+    // new mutation, which deletes the element from doneBg before reprocessing.
     doneBg.add(el);
   }
 
   // ── D) <link rel="preload" as="image"> rewriting ──────────────────────────
   // Parser-created preload links bypass prehook's JS patches. Rewrite the href
   // to the proxy URL so the preloaded bytes are compressed instead of the
-  // original full-resolution image.
+  // original full-resolution image. Keep the original href so the isolated
+  // layer can also restore it if the link is repurposed before prehook sees
+  // the change.
+  function restorePreloadHref(el) {
+    // Fall back to the MAIN-world pending stash (prehook.js parks a preload's
+    // original href in data-bh-preload-href while href="about:blank"), so a
+    // parked link can never be left pointing at about:blank by this layer.
+    const original = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) ||
+      el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
+    if (!original) return;
+
+    const current = el.getAttribute("href") || "";
+    const applied = el.getAttribute(APPLIED_PRELOAD_HREF_ATTR);
+    // Do not overwrite a newer URL deliberately assigned by the page.
+    if (current === "about:blank" || (applied && current === applied)) {
+      el.setAttribute("href", original);
+    }
+    el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+    el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+    el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
+  }
+
   function rewritePreload(el) {
     if (!el || el.tagName !== "LINK") return;
-    if (!opts?.enabled) return;
-    if (!/(?:^|\s)preload(?:\s|$)/i.test(el.rel || "")) return;
+
+    // Settings not loaded yet: prehook.js may have parked this link on
+    // about:blank with the original stashed in data-bh-preload-href.
+    // Do NOT restore here — un-parking before settings are known would
+    // restart the full-resolution download the parking was preventing.
+    if (!opts) return;
+
     const as = String(el.getAttribute("as") || "").toLowerCase();
     const type = String(el.getAttribute("type") || "");
-    if (as !== "image" && (as || !/^image\//i.test(type))) return;
+    const isImagePreload = /(?:^|\s)preload(?:\s|$)/i.test(el.rel || "") &&
+      (as === "image" || (!as && /^image\//i.test(type)));
+
+    if (!isImagePreload) {
+      restorePreloadHref(el);
+      return;
+    }
 
     const href = el.getAttribute("href");
-    const u = href ? resolveImage(href) : null;
-    if (!u || shouldSkip(u)) return;
-    el.setAttribute("href", buildProxyUrl(u.href));
+    const savedOriginal = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+    const original = savedOriginal ||
+      el.getAttribute(PENDING_PRELOAD_HREF_ATTR) || href;
+
+    if (!opts.enabled) {
+      restorePreloadHref(el);
+      return;
+    }
+
+    const u = original ? resolveImage(original) : null;
+    if (!u || shouldSkip(u)) {
+      restorePreloadHref(el);
+      return;
+    }
+
+    const proxy = buildProxyUrl(u.href);
+    if (proxy !== original) {
+      el.setAttribute(ORIGINAL_PRELOAD_HREF_ATTR, original);
+      el.setAttribute(APPLIED_PRELOAD_HREF_ATTR, proxy);
+    } else {
+      el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+    }
+    el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
+    if (href !== proxy) el.setAttribute("href", proxy);
   }
 
   const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]", 'link[rel~="preload"]'].join(",");
@@ -553,10 +678,17 @@
         } else if (m.attributeName === "style") {
           doneBg.delete(t);
           bgTargets.add(t);
-        } else if (lazyAttrSet.has(m.attributeName) || m.attributeName === "data-srcset") {
-          doneLazy.delete(t);
-          lazyTargets.add(t);
-        } else if (m.target.tagName === "LINK" &&
+        } else if ((t.tagName === "IMG" ||
+                     (t.tagName === "SOURCE" && t.parentElement?.tagName === "PICTURE")) &&
+                   (lazyAttrSet.has(m.attributeName) || m.attributeName === "data-srcset")) {
+          // Restored originals must not be re-proxied; keep them marked done.
+          if (t.getAttribute(RESTORED_ATTR) === "1") continue;
+          // Ignore records produced by our own proxy writes — same guard the
+          // src/srcset branch applies above.
+          const cur = t.getAttribute(m.attributeName);
+          const u = cur ? resolveImage(cur) : null;
+          if (u && !shouldSkip(u)) { doneLazy.delete(t); lazyTargets.add(t); }
+        } else if (t.tagName === "LINK" &&
                    (m.attributeName === "href" || m.attributeName === "rel" || m.attributeName === "as" || m.attributeName === "type")) {
           preloadTargets.add(t);
         }
@@ -582,6 +714,16 @@
     // DOM after the bounded batch so missed attribute changes/additions are not
     // silently left unprocessed.
     for (const m of mutations) {
+      // href/rel/as/type records are only meaningful on <link> elements. The
+      // observer's attribute filter is document-wide, so drop the dead records
+      // (e.g. <a href> churn) before they consume the bounded queue and force
+      // early overflow reconciles.
+      if (m.type === "attributes" &&
+          (m.attributeName === "href" || m.attributeName === "rel" ||
+           m.attributeName === "as" || m.attributeName === "type") &&
+          m.target?.tagName !== "LINK") {
+        continue;
+      }
       if (pendingMutations.length >= MUTATION_RECORD_LIMIT) {
         mutationOverflowed = true;
         break;
@@ -634,21 +776,38 @@
   // Try storage.local first (bhOpts mirror, ~5 ms). If bhOpts isn't there yet
   // (fresh install, service worker hasn't run, browser restart) fall back to
   // storage.sync and write the mirror so subsequent pages are fast.
-  chrome.storage.local.get({ bhOpts: null }, d => {
-    if (destroyed) return;
-    if (d.bhOpts) {
-      applyOpts(d.bhOpts);
-      publishSettings();
-    } else {
-      chrome.storage.sync.get(DEFAULTS, synced => {
-        if (destroyed) return;
-        applyOpts(synced);
+  // Register the failsafe before issuing the storage read. If the storage API
+  // throws synchronously, a callback-only failsafe registered after this call
+  // would never run and MAIN-world images parked on about:blank would strand.
+  setTimeout(() => {
+    if (destroyed || opts) return;
+    try { applyOpts(DEFAULTS); publishSettings(); } catch {}
+  }, 800);
+
+  try {
+    chrome.storage.local.get({ bhOpts: null }, d => {
+      if (destroyed) return;
+      if (d.bhOpts) {
+        applyOpts(d.bhOpts);
         publishSettings();
-        // Write mirror so next page load takes the fast path
-        chrome.storage.local.set({ bhOpts: opts });
-      });
-    }
-  });
+      } else {
+        try {
+          chrome.storage.sync.get(DEFAULTS, synced => {
+            if (destroyed) return;
+            applyOpts(synced);
+            publishSettings();
+            // Write mirror so next page load takes the fast path
+            try { chrome.storage.local.set({ bhOpts: opts }); } catch {}
+          });
+        } catch {}
+      }
+    });
+  } catch {}
+
+  // If neither storage area answers (storage.sync unsupported, or a runtime
+  // error on both reads), prehook.js images parked on about:blank while
+  // waiting for settings would stay blank forever. The failsafe registered
+  // above publishes the shared defaults after a short delay.
 
   // Stay current when settings change.
   // Primary: local area (bhOpts mirror updated by service worker, instant).
@@ -666,15 +825,17 @@
       applyOpts(next);
       publishSettings();
     } else if (area === "sync") {
-      chrome.storage.sync.get(DEFAULTS, synced => {
-        if (destroyed) return;
-        const changed = !sameOpts(synced, opts);
-        if (!changed) return;
-        applyOpts(synced);
-        publishSettings();
-        // The service worker normally refreshes the mirror; only write when it differs.
-        chrome.storage.local.set({ bhOpts: opts });
-      });
+      try {
+        chrome.storage.sync.get(DEFAULTS, synced => {
+          if (destroyed) return;
+          const changed = !sameOpts(synced, opts);
+          if (!changed) return;
+          applyOpts(synced);
+          publishSettings();
+          // The service worker normally refreshes the mirror; only write when it differs.
+          try { chrome.storage.local.set({ bhOpts: opts }); } catch {}
+        });
+      } catch {}
     }
   });
 

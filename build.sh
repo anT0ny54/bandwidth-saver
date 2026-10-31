@@ -97,14 +97,27 @@ def const_block(src, name):
     return m.group(1) if name == "WSRV_PROXY" else strip_comments(m.group(1))
 
 def fn_block(src, name):
-    m = re.search(rf"function\s+{name}\s*\([^)]*\)\s*\{{.*?\n  \}}", src, re.S)
-    return strip_comments(m.group(0)) if m else None
+    # Match to the function's OWN closing brace by counting braces. The old
+    # heuristic truncated at the first "\\n  }" (two-space indent), which
+    # could compare a partial function and false-pass the parity check if a
+    # nested block ever ended at that indentation.
+    m = re.search(rf"function\s+{name}\s*\([^)]*\)\s*\{{", src)
+    if not m:
+        return None
+    depth, i = 1, m.end()
+    while i < len(src) and depth:
+        ch = src[i]
+        if ch == "{": depth += 1
+        elif ch == "}": depth -= 1
+        i += 1
+    return strip_comments(src[m.start():i]) if not depth else None
 
 content_src = open(sys.argv[1], encoding="utf-8").read()
 prehook_src = open(sys.argv[2], encoding="utf-8").read()
 
 for name, grab in (("WSRV_PROXY", const_block), ("TINY_DIM_RE", const_block),
-                   ("parseSrcset", fn_block), ("buildProxyUrl", fn_block)):
+                   ("parseSrcset", fn_block), ("buildProxyUrl", fn_block),
+                   ("updateProxyConfig", fn_block)):
     a, b = grab(content_src, name), grab(prehook_src, name)
     if a is None or b is None:
         raise SystemExit(f"ERROR: could not extract '{name}' for parity check")
@@ -212,9 +225,10 @@ rm -f "$ZIPFILE"
 
 unzip -tq "$ZIPFILE" >/dev/null
 ZIP_ENTRIES="$(unzip -Z1 "$ZIPFILE")"
-grep -Fxq 'manifest.json' <<< "$ZIP_ENTRIES"
-grep -Fxq 'popup.html' <<< "$ZIP_ENTRIES"
-grep -Fxq 'options.html' <<< "$ZIP_ENTRIES"
+# Bare greps would abort via set -e without saying why — report each failure.
+grep -Fxq 'manifest.json' <<< "$ZIP_ENTRIES" || { echo "ERROR: manifest.json missing from archive" >&2; exit 1; }
+grep -Fxq 'popup.html'    <<< "$ZIP_ENTRIES" || { echo "ERROR: popup.html missing from archive" >&2; exit 1; }
+grep -Fxq 'options.html'  <<< "$ZIP_ENTRIES" || { echo "ERROR: options.html missing from archive" >&2; exit 1; }
 # NOTE: a bare `! cmd` is exempt from `set -e`, so use an explicit if.
 if grep -q '^bandwidth-saver-main/' <<< "$ZIP_ENTRIES"; then
   echo "ERROR: zip contains a top-level project folder" >&2

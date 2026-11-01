@@ -20,6 +20,8 @@ const presetBtns  = Array.from(document.querySelectorAll("#qualityPresets .prese
 // must be merged into this — merging into DEFAULTS reset unchanged keys (e.g. a
 // disabled extension appeared enabled after toggling grayscale).
 let state = { ...DEFAULTS };
+let initialLoadPending = true;
+const initialSyncOverrides = Object.create(null);
 let currentHost  = "";
 let currentIsWeb = false;
 
@@ -66,13 +68,18 @@ function updateEnabledUI(enabled) {
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 async function load() {
+  let stored;
   try {
-    state = await chrome.storage.sync.get(DEFAULTS);
+    stored = await chrome.storage.sync.get(DEFAULTS);
   } catch {
     // A rejected storage read must not leave the popup stuck on the
     // "Checking status…" placeholder — fall back to the shared defaults.
-    state = { ...DEFAULTS };
+    stored = DEFAULTS;
   }
+  // A storage.onChanged event can beat this asynchronous read. Overlay those
+  // newer values so the older snapshot cannot roll the UI back.
+  state = { ...DEFAULTS, ...(stored || {}), ...initialSyncOverrides };
+  initialLoadPending = false;
   applyUI(state);
   detectSite().then(() => renderSiteUI(state));
 }
@@ -231,7 +238,11 @@ settingsBtn.addEventListener("click", () => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   // Apply directly from the change payload — no redundant storage re-read.
-  for (const [k, v] of Object.entries(changes)) state[k] = v.newValue ?? DEFAULTS[k];
+  for (const [k, v] of Object.entries(changes)) {
+    const value = v.newValue ?? DEFAULTS[k];
+    state[k] = value;
+    if (initialLoadPending) initialSyncOverrides[k] = value;
+  }
   applyUI(state);
   if ("excludeDomains" in changes) renderSiteUI(state);
 });

@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 ## v0.2.0
 
+- Second-pass full-project audit fixes: popup and settings-page initialization
+  now preserve newer `storage.onChanged` values that arrive before the initial
+  storage read completes, preventing stale snapshots from rolling controls
+  back. The settings page now normalizes stored quality and max-width values
+  exactly like the interception layers (including blank, out-of-range, and
+  unsafe values), and reset applies the known defaults directly instead of
+  making an unnecessary second storage read.
+- Separated the saved original for `data-srcset` from the real `srcset`
+  fallback, so lazy responsive-image metadata cannot overwrite the original
+  responsive candidates. A failed image restores both attributes when needed.
+- Left fragment-only inline CSS URLs (for example `url(#gradient)`) untouched;
+  resolving them against the page URL could otherwise send the document itself
+  to the image proxy. Empty domain entries are now discarded consistently in
+  both DOM-processing worlds after normalization.
+- Hardened the build parity check so braces in quoted strings, template
+  literals, and comments do not truncate the shared-function comparison.
+
+- Fixed stale asynchronous settings and DNR refresh races: callbacks from an
+  earlier storage read can no longer overwrite newer settings/rules after a
+  watchdog releases the operation. Icon reads and the local settings mirror
+  use the same generation guard; late mirror writes and DNR updates trigger a
+  fresh read/update so stale work cannot win last. Failed sync reads now keep
+  the existing local mirror and toolbar icon instead of overwriting them with
+  defaults; a failed install-time read likewise no longer seeds defaults over
+  an existing store.
+- Fixed `content.js` retaining obsolete original-source metadata when a page
+  reuses an image element for a skipped or non-proxied URL; the error handler
+  now restores only when the failed current candidate is still a proxy URL.
+- Fixed picture-source lifecycle handling: media `<source>` nodes are excluded
+  from image scans and mutation queues, while a source moved into `<picture>`
+  is re-armed and processed. Generic elements carrying ambiguous `data-*`
+  attributes are no longer included in the candidate scan at all.
+- Fixed lazy-image extension filtering to inspect the resolved URL pathname
+  rather than query-string text, and allow `.php` image endpoints.
+- Hardened numeric settings handling: blank/non-numeric/non-finite quality
+  values fall back to the default and finite values clamp to `1..100`; invalid, negative,
+  non-finite, or unsafe max-widths fall back to `768`, while `maxWidth: 0`
+  remains the intentional no-width-limit value.
+- GitHub Actions now builds pull requests targeting `main`; the release job is
+  restricted to non-PR runs. README documents the updated filtering, fallback,
+  source lifecycle, settings normalization, and validation behavior.
+
 - Fixed an infinite self-trigger loop in `content.js`: `srcset`/`data-srcset`
   were rewritten with an unconditional `setAttribute`, which queues a mutation
   record even for an identical value. For a mixed list where one candidate is

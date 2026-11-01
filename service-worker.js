@@ -40,14 +40,17 @@ const RULE_ID_SAVEDATA  = 3;  // sends Save-Data: on to compatible web requests
 const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP, RULE_ID_SAVEDATA];
 
 // ── Concurrency guard ─────────────────────────────────────────────────────────
-let refreshing     = false;
-let pendingRefresh = false;
-let mirroring      = false;
-let pendingMirror  = false;
+let refreshing        = false;
+let pendingRefresh    = false;
+let refreshGeneration = 0;
+let mirroring         = false;
+let pendingMirror     = false;
+let mirrorGeneration  = 0;
 
 function refreshRules() {
   if (refreshing) { pendingRefresh = true; return; }
   refreshing = true;
+  const generation = ++refreshGeneration;
   let settled = false;
   const finish = function() {
     if (settled) return;
@@ -63,11 +66,15 @@ function refreshRules() {
   // storage/DNR callback instead of reporting lastError. Without a watchdog
   // that dropped callback wedges every later rules refresh behind refreshing=true.
   const watchdog = setTimeout(function() {
+    // Invalidate a storage callback that arrives after this timeout even when
+    // no newer refresh has started yet. A subsequent refresh will get a fresh
+    // generation from refreshRules().
+    if (generation === refreshGeneration) refreshGeneration++;
     console.warn("[Bandwidth Saver] DNR rule refresh timed out; releasing refresh guard.");
     finish();
   }, 5000);
   try {
-    doRefreshRules(finish);
+    doRefreshRules(finish, generation);
   } catch (error) {
     console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", error);
     finish();
@@ -82,6 +89,7 @@ function refreshRules() {
 function mirrorToLocal() {
   if (mirroring) { pendingMirror = true; return; }
   mirroring = true;
+  const generation = ++mirrorGeneration;
   let settled = false;
   const finish = function() {
     if (settled) return;
@@ -102,12 +110,27 @@ function mirrorToLocal() {
   }, 5000);
   try {
     chrome.storage.sync.get(DEFAULTS, opts => {
+      // A callback can arrive after the watchdog released this operation and
+      // a newer mirror has started. Never let that older snapshot overwrite it.
+      if (settled || generation !== mirrorGeneration) return;
       try {
         const error = chrome.runtime.lastError?.message || "";
-        if (error) console.warn("[Bandwidth Saver] Failed to read settings for mirror:", error);
-        // If sync failed and returned no snapshot, mirror the defaults so
-        // content scripts still receive a usable settings object.
-        chrome.storage.local.set({ bhOpts: (opts && !error) ? opts : DEFAULTS }, finish);
+        if (error || !opts || typeof opts !== "object") {
+          if (error) console.warn("[Bandwidth Saver] Failed to read settings for mirror:", error);
+          // Keep any existing mirror on read failure. Content scripts have
+          // their own sync fallback and defaults failsafe for a fresh install.
+          finish();
+          return;
+        }
+        chrome.storage.local.set({ bhOpts: opts }, function() {
+          // A write callback can arrive after its watchdog and a newer mirror
+          // have completed. Re-read sync so a late old write cannot be final.
+          if (settled || generation !== mirrorGeneration) {
+            mirrorToLocal();
+            return;
+          }
+          finish();
+        });
       } catch {
         finish();
       }
@@ -130,6 +153,10 @@ chrome.runtime.onInstalled.addListener(function() {
   // be detected. Guarded like every other storage call.
   try {
     chrome.storage.sync.get(null, function(all) {
+      if (chrome.runtime.lastError) {
+        console.warn("[Bandwidth Saver] Failed to read settings during install:", chrome.runtime.lastError.message);
+        return;
+      }
       const stored = all || {};
       const missing = {};
       for (const k of Object.keys(DEFAULTS)) {
@@ -154,6 +181,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 // ── Extension icon ────────────────────────────────────────────────────────────
 const ICON_PATH_ON  = { 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" };
 const ICON_PATH_OFF = { 16: "icons/icon-16-disabled.png", 32: "icons/icon-32-disabled.png", 48: "icons/icon-48-disabled.png", 128: "icons/icon-128-disabled.png" };
+let iconGeneration = 0;
 
 // Startup sequence. Runs AFTER the icon-path constants exist: updateIcon()'s
 // synchronous fallback reads them, and a fork where chrome.storage.sync.get
@@ -163,7 +191,9 @@ refreshRules();
 updateIcon();
 
 function updateIcon(enabled) {
+  const generation = ++iconGeneration;
   const apply = on => {
+    if (generation !== iconGeneration) return;
     const path = on ? ICON_PATH_ON : ICON_PATH_OFF;
     // Some Chromium forks throw synchronously instead of returning a rejected
     // promise — catch both so a broken setIcon can never kill worker startup.
@@ -177,6 +207,11 @@ function updateIcon(enabled) {
   if (typeof enabled === "boolean") { apply(enabled); return; }
   try {
     chrome.storage.sync.get({ enabled: DEFAULTS.enabled }, d => {
+      if (generation !== iconGeneration) return;
+      if (chrome.runtime.lastError) {
+        console.warn("[Bandwidth Saver] Failed to read enabled state for icon:", chrome.runtime.lastError.message);
+        return;
+      }
       const value = d && typeof d.enabled === "boolean" ? d.enabled : DEFAULTS.enabled;
       apply(value);
     });
@@ -411,9 +446,18 @@ function onProxyCompleted({ responseHeaders, fromCache, statusCode }) {
 
 // `finish` is idempotent (see refreshRules), so it can be called from every
 // exit path without a second guard here.
-function doRefreshRules(finish) {
+function doRefreshRules(finish, generation) {
   try {
     chrome.storage.sync.get(DEFAULTS, function(rawOpts) {
+      // A delayed read must not apply an obsolete ruleset after the watchdog
+      // has allowed a newer refresh to run.
+      if (generation !== refreshGeneration) { finish(); return; }
+      const storageError = chrome.runtime.lastError?.message || "";
+      if (storageError) {
+        console.warn("[Bandwidth Saver] Failed to read settings for DNR rules:", storageError);
+        finish();
+        return;
+      }
       // One guard around rule-building AND the updateDynamicRules call: a
       // synchronous throw in either path must still reach finish() (the
       // async callback below completes via its own finally block).
@@ -487,6 +531,12 @@ function doRefreshRules(finish) {
         chrome.declarativeNetRequest.updateDynamicRules(
           { removeRuleIds: ALL_RULE_IDS, addRules: addRules },
           function() {
+            if (generation !== refreshGeneration) {
+              // The request may have reached DNR after its watchdog expired.
+              // Schedule a fresh read/update so the active settings win last.
+              refreshRules();
+              return;
+            }
             try {
               if (chrome.runtime.lastError) {
                 console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", chrome.runtime.lastError.message);

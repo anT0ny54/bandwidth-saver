@@ -55,6 +55,7 @@
       .map(s => s.toLowerCase())
       .filter(Boolean)
       .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
+      .filter(Boolean)
   );
   const isHttp = u => /^https?:\/\//i.test(u);
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
@@ -73,12 +74,16 @@
     // into 60 and silently bypassed the clamp.
     // Invalid maxWidth values fall back to DEFAULTS.maxWidth rather than
     // 0: a corrupt legacy value must not silently disable the width cap.
-    const rawQuality = Number(opts.quality ?? DEFAULTS.quality);
+    const numericValue = value =>
+      (typeof value === "number" || (typeof value === "string" && value.trim() !== ""))
+        ? Number(value) : NaN;
+    const rawQuality = numericValue(opts.quality ?? DEFAULTS.quality);
     const quality = Math.max(1, Math.min(100,
       Number.isFinite(rawQuality) ? Math.trunc(rawQuality) : DEFAULTS.quality));
-    const rawMaxWidth = Number(opts.maxWidth ?? DEFAULTS.maxWidth);
-    const maxWidth = Number.isFinite(rawMaxWidth)
-      ? Math.max(0, Math.trunc(rawMaxWidth))
+    const rawMaxWidth = numericValue(opts.maxWidth ?? DEFAULTS.maxWidth);
+    const truncatedMaxWidth = Math.trunc(rawMaxWidth);
+    const maxWidth = Number.isSafeInteger(truncatedMaxWidth) && truncatedMaxWidth >= 0
+      ? truncatedMaxWidth
       : DEFAULTS.maxWidth;
     // Store the normalized values back on the merged snapshot. That keeps
     // settings comparisons exact and prevents legacy string values from

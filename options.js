@@ -30,6 +30,9 @@ const WIDTH_PRESETS   = widthPresets.map(b => Number(b.dataset.w));
 // custom input is cleared (previously this wrongly restored DEFAULTS).
 let savedQuality = DEFAULTS.quality;
 let savedWidth   = DEFAULTS.maxWidth;
+let initialLoadPending = true;
+const initialSyncOverrides = Object.create(null);
+let initialStatsChanged = false;
 
 if (versionEl) {
   versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
@@ -57,9 +60,31 @@ function fmtBytes(n) {
   return sign + abs + " B";
 }
 
-function toFiniteNumber(value, fallback) {
+function storedNumber(value) {
+  if (typeof value === "string" && value.trim() === "") return NaN;
   const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+  return Number.isFinite(n) ? Math.trunc(n) : NaN;
+}
+
+function normalizeQuality(value) {
+  const n = storedNumber(value);
+  return Number.isFinite(n) ? Math.max(1, Math.min(100, n)) : DEFAULTS.quality;
+}
+
+function normalizeWidth(value) {
+  const n = storedNumber(value);
+  return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULTS.maxWidth;
+}
+
+function applySettings(d) {
+  enabledEl.checked    = !!d.enabled;
+  grayscaleEl.checked = !!d.grayscale;
+  saveDataEl.checked   = !!d.saveData;
+  excludeEl.value      = d.excludeDomains || "";
+  savedQuality = normalizeQuality(d.quality ?? DEFAULTS.quality);
+  savedWidth   = normalizeWidth(d.maxWidth ?? DEFAULTS.maxWidth);
+  setQualityUI(savedQuality);
+  setWidthUI(savedWidth);
 }
 
 function renderStats(stats = {}) {
@@ -147,15 +172,9 @@ async function load() {
     d = { ...DEFAULTS };
     s = { stats: EMPTY_STATS };
   }
-  enabledEl.checked   = !!d.enabled;
-  grayscaleEl.checked = !!d.grayscale;
-  saveDataEl.checked   = !!d.saveData;
-  excludeEl.value     = d.excludeDomains || "";
-  savedQuality = toFiniteNumber(d.quality ?? DEFAULTS.quality, DEFAULTS.quality);
-  savedWidth   = toFiniteNumber(d.maxWidth ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth);
-  setQualityUI(savedQuality);
-  setWidthUI(savedWidth);
-  renderStats(s.stats);
+  applySettings({ ...DEFAULTS, ...(d || {}), ...initialSyncOverrides });
+  if (!initialStatsChanged) renderStats(s?.stats || EMPTY_STATS);
+  initialLoadPending = false;
 }
 load();
 
@@ -163,6 +182,10 @@ load();
 // service-worker statistics flushes while this tab remains open.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "sync") {
+    for (const [key, change] of Object.entries(changes)) {
+      const value = change.newValue ?? DEFAULTS[key];
+      if (initialLoadPending) initialSyncOverrides[key] = value;
+    }
     if ("enabled" in changes) {
       enabledEl.checked = !!(changes.enabled.newValue ?? DEFAULTS.enabled);
     }
@@ -176,14 +199,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
       excludeEl.value = String(changes.excludeDomains.newValue ?? DEFAULTS.excludeDomains);
     }
     if ("quality" in changes) {
-      savedQuality = toFiniteNumber(changes.quality.newValue ?? DEFAULTS.quality, DEFAULTS.quality);
+      savedQuality = normalizeQuality(changes.quality.newValue ?? DEFAULTS.quality);
       setQualityUI(savedQuality);
     }
     if ("maxWidth" in changes) {
-      savedWidth = toFiniteNumber(changes.maxWidth.newValue ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth);
+      savedWidth = normalizeWidth(changes.maxWidth.newValue ?? DEFAULTS.maxWidth);
       setWidthUI(savedWidth);
     }
   } else if (area === "local" && changes.stats) {
+    if (initialLoadPending) initialStatsChanged = true;
     renderStats(changes.stats.newValue || {});
   }
 });
@@ -297,8 +321,8 @@ async function save() {
 
   // Reload whenever a URL-shaping setting changed (quality, max width, or the
   // exclusion list) — exclusion changes only take effect on a fresh page load.
-  const previousQuality = toFiniteNumber(current.quality ?? DEFAULTS.quality, DEFAULTS.quality);
-  const previousMaxWidth = toFiniteNumber(current.maxWidth ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth);
+  const previousQuality = normalizeQuality(current.quality ?? DEFAULTS.quality);
+  const previousMaxWidth = normalizeWidth(current.maxWidth ?? DEFAULTS.maxWidth);
   if (quality !== previousQuality ||
       maxWidth !== previousMaxWidth ||
       normalizeDomainsKey(excludeDomains) !== normalizeDomainsKey(current.excludeDomains)) {
@@ -324,14 +348,13 @@ async function resetAll() {
     showToast("Couldn't reset settings", "err");
     return;
   }
-  await load();
-
   const affectsCurrentPage =
     !!current.enabled !== DEFAULTS.enabled ||
-    toFiniteNumber(current.quality ?? DEFAULTS.quality, DEFAULTS.quality) !== DEFAULTS.quality ||
-    toFiniteNumber(current.maxWidth ?? DEFAULTS.maxWidth, DEFAULTS.maxWidth) !== DEFAULTS.maxWidth ||
+    normalizeQuality(current.quality ?? DEFAULTS.quality) !== DEFAULTS.quality ||
+    normalizeWidth(current.maxWidth ?? DEFAULTS.maxWidth) !== DEFAULTS.maxWidth ||
     normalizeDomainsKey(current.excludeDomains ?? DEFAULTS.excludeDomains) !== normalizeDomainsKey(DEFAULTS.excludeDomains) ||
     !!current.grayscale !== DEFAULTS.grayscale;
+  applySettings(DEFAULTS);
   if (affectsCurrentPage) await reloadCurrentPage();
   showToast("Reset to defaults");
 }

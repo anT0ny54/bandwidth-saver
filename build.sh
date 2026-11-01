@@ -97,18 +97,57 @@ def const_block(src, name):
     return m.group(1) if name == "WSRV_PROXY" else strip_comments(m.group(1))
 
 def fn_block(src, name):
-    # Match to the function's OWN closing brace by counting braces. The old
-    # heuristic truncated at the first "\\n  }" (two-space indent), which
-    # could compare a partial function and false-pass the parity check if a
-    # nested block ever ended at that indentation.
+    # Match the function's OWN closing brace. Ignore braces in strings and
+    # comments so source text cannot truncate the parity comparison. The
+    # checked helpers contain no brace-quantifier regular expressions.
     m = re.search(rf"function\s+{name}\s*\([^)]*\)\s*\{{", src)
     if not m:
         return None
     depth, i = 1, m.end()
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
     while i < len(src) and depth:
         ch = src[i]
-        if ch == "{": depth += 1
-        elif ch == "}": depth -= 1
+        nxt = src[i + 1] if i + 1 < len(src) else ""
+        if line_comment:
+            if ch == "\n": line_comment = False
+            i += 1
+            continue
+        if block_comment:
+            if ch == "*" and nxt == "/":
+                block_comment = False
+                i += 2
+            else:
+                i += 1
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            line_comment = True
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            block_comment = True
+            i += 2
+            continue
+        if ch in ("'", '"', "`"):
+            # Treat the complete template literal as string content; braces
+            # inside ${...} are balanced within the literal and not function
+            # delimiters.
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
         i += 1
     return strip_comments(src[m.start():i]) if not depth else None
 

@@ -1,6 +1,9 @@
 name: Build and Release
 
 on:
+  pull_request:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -40,6 +43,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:

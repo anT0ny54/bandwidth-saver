@@ -1,4 +1,4 @@
-import { DEFAULTS } from "./defaults.js";
+import { DEFAULTS, parseDomains } from "./defaults.js";
 
 const $ = id => document.getElementById(id);
 
@@ -17,8 +17,10 @@ const versionEl       = $("extensionVersion");
 const customQualityEl = $("customQuality");
 const customWidthEl   = $("customWidth");
 
+const EMPTY_STATS = { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 };
+
 const qualityPresets = Array.from(document.querySelectorAll("#qualityPresets .preset"));
-const widthPresets   = Array.from(document.querySelectorAll("#widthPresets  .preset"));
+const widthPresets   = Array.from(document.querySelectorAll("#widthPresets .preset"));
 
 // Single source of truth for preset values: derive them from the buttons'
 // data-q / data-w attributes so the markup can never drift from the JS.
@@ -64,7 +66,7 @@ function renderStats(stats = {}) {
   const files = Number(stats.filesProcessed) || 0;
   statImagesEl.textContent = files.toLocaleString();
   statBytesEl.textContent  = fmtBytes(stats.bytesProcessed);
-  statSavedEl.textContent  = fmtBytes(stats.bytesSaved || 0);
+  statSavedEl.textContent  = fmtBytes(stats.bytesSaved);
 }
 
 async function reloadCurrentPage() {
@@ -136,14 +138,14 @@ async function load() {
   try {
     [d, s] = await Promise.all([
       chrome.storage.sync.get(DEFAULTS),
-      chrome.storage.local.get({ stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } })
+      chrome.storage.local.get({ stats: EMPTY_STATS })
     ]);
   } catch {
     // A rejected storage read must not leave the settings page stuck on
     // placeholders — fall back to the shared defaults and empty statistics
     // (same hardening as the popup's load()).
     d = { ...DEFAULTS };
-    s = { stats: { filesProcessed: 0, bytesProcessed: 0, bytesSaved: 0 } };
+    s = { stats: EMPTY_STATS };
   }
   enabledEl.checked   = !!d.enabled;
   grayscaleEl.checked = !!d.grayscale;
@@ -263,14 +265,7 @@ saveDataEl.addEventListener("change", async () => {
 // Compare exclusion lists by effect, not spelling: separator style, whitespace,
 // casing, duplicates, and entry order don't change which sites are skipped, so
 // they must not force a page reload.
-function normalizeDomainsKey(text) {
-  return Array.from(new Set(
-    String(text || "")
-      .split(/[,\s]+/)
-      .map(s => s.trim().toLowerCase()).filter(Boolean)
-      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
-  )).sort().join(" ");
-}
+const normalizeDomainsKey = text => Array.from(new Set(parseDomains(text))).sort().join(" ");
 
 async function save() {
   // Reject invalid custom values instead of silently falling back to a preset.
@@ -345,7 +340,9 @@ async function resetStats() {
   try {
     const result = await chrome.runtime.sendMessage({ type: "BW_RESET_STATS" });
     if (!result?.ok) throw new Error(result?.error || "The service worker could not reset statistics.");
-    await load();
+    // Only the statistics changed; a full load() would also overwrite any
+    // unsaved edits in the settings form.
+    renderStats();
     showToast("Stats cleared");
   } catch {
     showToast("Couldn't reset stats", "err");

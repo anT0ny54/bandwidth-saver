@@ -17,3 +17,14 @@ export const DEFAULTS = {
   excludeDomains: "",
   fallbackToOrigin: true,  // always restore original URL if the proxied image errors
 };
+
+// Normalizes an exclusion list (space/comma/whitespace separated) into bare
+// lowercase hostnames: optional scheme, path, and leading/trailing dots are
+// stripped. Shared by popup.js and options.js.
+export function parseDomains(text) {
+  return String(text || "")
+    .split(/[,\s]+/)
+    .map(s => s.trim().toLowerCase()).filter(Boolean)
+    .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
+    .filter(Boolean);
+}

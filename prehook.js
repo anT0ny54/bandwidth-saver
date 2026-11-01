@@ -113,11 +113,7 @@
   // invalidate the proxy URL/srcset caches. (Same normalization as the
   // popup/settings parsers and DNR validation.)
   // KEEP IN SYNC with content.js.
-  const domainKey = text => Array.from(new Set(
-    String(text || "").split(/[,\s]+/)
-      .map(s => s.trim().toLowerCase()).filter(Boolean)
-      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
-  )).sort().join(" ");
+  const domainKey = text => Array.from(toDomainSet(text)).sort().join(" ");
   const sameOpts = (a, b) => !!a && !!b &&
     a.enabled === b.enabled &&
     a.quality === b.quality &&
@@ -352,10 +348,8 @@
     if (el instanceof HTMLSourceElement &&
         !(el.parentElement && el.parentElement.tagName === "PICTURE")) return ss;
 
-    if (el) {
-      const cached = srcsetCache.get(el);
-      if (cached && (cached.input === ss || cached.output === ss)) return cached.output;
-    }
+    const cached = srcsetCache.get(el);
+    if (cached && (cached.input === ss || cached.output === ss)) return cached.output;
 
     const cands = parseSrcset(ss);
     let touched = false;
@@ -369,7 +363,7 @@
     });
     const output = touched ? parts.join(", ") : ss;
     if (output !== ss) rememberOriginal(el, null, ss);
-    if (el) srcsetCache.set(el, { input: ss, output });
+    srcsetCache.set(el, { input: ss, output });
     return output;
   }
 
@@ -486,10 +480,6 @@
       applyPreloadHref(el, original);
     } catch {}
   }
-
-  // Proxy failures are intentionally left on the proxy URL. Restoring the
-  // origin URL here would make the browser resolve/contact the origin host.
-  // The proxy itself remains responsible for fetching the source image.
 
   // ── Patch <img>.src ────────────────────────────────────────────────────────
   Object.defineProperty(imgProto, "src", {
@@ -687,6 +677,14 @@
       if (destroyed) return setAttr.call(this, name, value);
       n = String(name).toLowerCase();
 
+      // setAttribute is among the hottest DOM calls on a page. Only seven
+      // attribute names are ever intercepted, so every other call returns
+      // before any instanceof test runs.
+      if (n !== "src" && n !== "srcset" && n !== "loading" && n !== "href" &&
+          n !== "rel" && n !== "as" && n !== "type") {
+        return setAttr.call(this, name, value);
+      }
+
       // Handle these before the generic src/srcset gate; otherwise the early
       // return below makes the loading and preload branches unreachable.
       if (this instanceof HTMLImageElement && n === "loading") {
@@ -722,9 +720,9 @@
         return;
       }
 
+      // Remaining names: only src/srcset on <img>/<source> are intercepted
+      // (loading and link attributes were fully handled above).
       if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
-      // n is known to be "src" or "srcset" here: the gate above returned
-      // early for every other attribute name.
       if (this instanceof HTMLImageElement) {
         const incoming = String(value ?? "");
         const restored = restoredAssignment(this, n, incoming);
@@ -811,7 +809,9 @@
             n.querySelectorAll('link[rel~="preload"]').forEach(processPreloadLink);
           }
         });
-      } else {
+      } else if (m.target instanceof HTMLLinkElement) {
+        // The attribute filter is document-wide (<a href>, <input type>, ...);
+        // only <link> records can matter.
         processPreloadLink(m.target);
       }
     }

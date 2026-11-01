@@ -116,8 +116,8 @@ content_src = open(sys.argv[1], encoding="utf-8").read()
 prehook_src = open(sys.argv[2], encoding="utf-8").read()
 
 for name, grab in (("WSRV_PROXY", const_block), ("TINY_DIM_RE", const_block),
-                   ("parseSrcset", fn_block), ("buildProxyUrl", fn_block),
-                   ("updateProxyConfig", fn_block)):
+                   ("sameOpts", const_block), ("parseSrcset", fn_block),
+                   ("buildProxyUrl", fn_block), ("updateProxyConfig", fn_block)):
     a, b = grab(content_src, name), grab(prehook_src, name)
     if a is None or b is None:
         raise SystemExit(f"ERROR: could not extract '{name}' for parity check")
@@ -187,7 +187,7 @@ for item in "${INCLUDE[@]}"; do
   cp -R "$ROOT_DIR/$item" "$STAGING/"
 done
 
-python3 - "$STAGING/manifest.json" "${INCLUDE[@]}" <<'PY'
+python3 - "$STAGING/manifest.json" <<'PY'
 import json, os, sys
 manifest_path = sys.argv[1]
 with open(manifest_path, encoding='utf-8') as f:
@@ -196,9 +196,6 @@ assert manifest.get('manifest_version') == 3, 'Manifest V3 required'
 version = manifest.get('version')
 assert isinstance(version, str) and version, 'Manifest version missing'
 root = os.path.dirname(manifest_path)
-for item in sys.argv[2:]:
-    if not os.path.exists(os.path.join(root, item)):
-        raise SystemExit(f'Missing staged item: {item}')
 
 # Every file the manifest references must be in the package.
 refs = set()

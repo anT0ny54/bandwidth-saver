@@ -25,12 +25,12 @@
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
 - **Per-image proxy fallback:** failed proxy image loads restore the saved original URL, ignore immediate retries of the same failed proxy URL, and allow the element to be reused for a different image.
 - **Configurable quality, grayscale, maximum width, and excluded domains.**
-- **Consistent exclusion parsing:** excluded domains accept space, comma, or any whitespace separation; optional schemes/paths, leading dots, and trailing dots are normalized identically in the popup, isolated content script, MAIN-world prehook, and DNR rule code.
+- **Consistent exclusion parsing:** excluded domains accept space, comma, or any whitespace separation; optional schemes/paths, leading dots, and trailing dots are normalized identically in the popup, settings page (both via the shared `parseDomains()` in `defaults.js`, which also drops entries that normalize to nothing, such as a bare `https://`), isolated content script, MAIN-world prehook, and DNR rule code.
 - **Double-proxy protection:** wsrv.nl URLs are never wrapped again.
-- **Bounded URL/cache work:** proxy URL caches are capped, srcset work is cached per element, the device-pixel-ratio clamp is computed once per settings change, ambiguous lazy attributes on generic non-image elements are dropped before URL resolution, and elements with nothing left to rewrite stay marked done so full-page rescans skip them.
+- **Bounded URL/cache work:** proxy URL caches are capped, srcset work is cached per element, the device-pixel-ratio clamp is computed once per settings change, ambiguous lazy attributes on generic non-image elements are dropped before URL resolution, mutation records that cannot affect any rewrite (e.g. `<a href>`, `<script src>`, `<iframe src>`, `<video src>` churn) are filtered out before they reach the bounded queue, elements with nothing left to rewrite stay marked done so full-page rescans skip them, `srcset`/`data-srcset` attributes are written only when the rewritten value differs (so a mixed list such as `icon.svg 1x, photo.jpg 2x` cannot make the content script re-trigger itself), the style mutation caused by the script's own inline-background rewrite is not re-parsed, non-image elements and elements without a `style` attribute are skipped before any image/background work, and the MAIN-world `setAttribute` hook exits immediately for every attribute it does not intercept.
 - **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup. Partial/older mirrors are merged with the shared defaults before use.
-- **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms; resetting statistics clears the worker's pending batch and waits out an in-flight flush. Storage failures release the worker's internal locks without dropping the in-memory batch or leaving later settings updates stuck; storage callbacks that are silently dropped are covered by watchdog timers on the mirror, flush, reset, and DNR rule-refresh guards.
-- **Live settings updates:** an open settings page follows synced setting changes, resets, and newly flushed statistics.
+- **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms; a failed read of the stored totals keeps the batch for retry instead of overwriting the totals with it, a batch already returned by the watchdog is never written a second time, and missing/corrupt stored totals are treated as zero instead of producing `NaN`; resetting statistics clears the worker's pending batch and waits out an in-flight flush. Storage failures release the worker's internal locks without dropping the in-memory batch or leaving later settings updates stuck; storage callbacks that are silently dropped are covered by watchdog timers on the mirror, flush, reset, and DNR rule-refresh guards.
+- **Live settings updates:** an open settings page follows synced setting changes, resets, and newly flushed statistics. The toolbar icon follows the `enabled` setting, and a removed `enabled` key falls back to the default (on).
 - **CSP handling:** Declarative Net Request removes CSP response headers for eligible page/frame URLs while image compression is enabled, including non-excluded frames and popups opened from excluded sites.
 - **Independent Save-Data hint:** the optional `Save-Data: on` request header remains active when enabled, even if image compression is turned off.
 - **Reproducible build:** `build.sh` validates, stages, timestamps, packages, and verifies the extension deterministically.
@@ -200,7 +200,7 @@ The settings page shows:
 
 - **Images:** successful, non-cached wsrv.nl image responses with a usable `Content-Length`
 - **Proxy bytes:** the sum of `Content-Length`, representing processed image bytes delivered to the browser
-- **Bytes saved:** the sum of `X-Upstream-Response-Length - Content-Length` for responses where both headers contain valid non-negative byte counts
+- **Bytes saved:** the sum of `X-Upstream-Response-Length - Content-Length` for responses where both headers contain valid byte counts (the result can be negative when processing enlarges an image)
 
 `X-Upstream-Response-Length` represents the number of bytes wsrv.nl received from the original image server; `Content-Length` represents the processed response size delivered by wsrv.nl. For example, 100,000 upstream bytes and 30,000 delivered bytes means 70,000 bytes saved (70%). Savings are an estimate for observed individual responses, not total account usage. If the custom upstream header is missing, that response contributes to image/proxy-byte totals but not to the savings total. Savings can be negative when the processed image is larger than its source. Browser JavaScript CORS visibility is separate from this extension statistic: the extension reads response headers through the browser extension `webRequest` API. Headers delivered only as raw bytes (`binaryValue`, with no string `value`) are decoded before parsing.
 
@@ -213,7 +213,7 @@ The popup provides:
 - enable/disable
 - grayscale
 - quality presets
-- current-site exclusion
+- current-site exclusion (re-including a site removes every exclusion entry that covers it, e.g. both `example.com` and `www.example.com`)
 - page reload
 - settings-page access
 
@@ -223,10 +223,11 @@ The settings page provides:
 
 - enable/disable (reloads the active web page so current resources match the new state)
 - grayscale
+- `Save-Data: on` header toggle
 - quality presets or custom 1–100
 - maximum-width presets or custom values ≥ 0
 - excluded domains
-- statistics and reset, with live updates while the page is open
+- statistics and reset, with live updates while the page is open (resetting statistics does not discard unsaved form edits)
 - reset-to-defaults
 
 Quality, width, enable/disable, reset-to-defaults, and excluded-domain changes reload the active HTTP(S) page when needed. Grayscale changes show a reload prompt because already-loaded proxy images cannot be recoloured in place. Existing resources are not retroactively guaranteed to change without a reload. Save-Data changes apply to subsequent HTTP(S) requests without requiring a page reload, and the header setting remains independent of whether image compression is enabled.
@@ -267,7 +268,7 @@ The script:
 
 1. reads the version from `manifest.json`;
 2. validates JavaScript syntax;
-3. verifies the duplicated proxy URL, tiny-dimension pattern, `srcset` parser, proxy URL builder, and settings-normalization helper in `content.js` and `prehook.js`, plus checks that all four `DEFAULTS` copies match;
+3. verifies the duplicated proxy URL, tiny-dimension pattern, `srcset` parser, proxy URL builder, settings normalizer, and settings-comparison helper (`sameOpts`) in `content.js` and `prehook.js`, plus checks that all four `DEFAULTS` copies match;
 4. stages only files required by the manifest/package;
 5. verifies manifest references;
 6. applies a fixed `SOURCE_DATE_EPOCH`;
@@ -278,8 +279,8 @@ The script:
 ### Keeping the two worlds in sync
 
 `content.js` (isolated world) and `prehook.js` (MAIN world) intentionally
-duplicate `WSRV_PROXY`, `TINY_DIM_RE`, `parseSrcset`, and `buildProxyUrl`
-because MAIN-world scripts cannot use ES module imports. `DEFAULTS` is also
+duplicate `WSRV_PROXY`, `TINY_DIM_RE`, `parseSrcset`, `buildProxyUrl`,
+`updateProxyConfig`, and `sameOpts` because MAIN-world scripts cannot use ES module imports. `DEFAULTS` is also
 copied into `defaults.js`, `content.js`, `prehook.js`, and `service-worker.js`.
 `build.sh` compares those shared pieces and fails when they drift. The skip
 logic is intentionally adapted to each world's job rather than text-compared;
@@ -298,7 +299,7 @@ GitHub Actions runs the same build on pushes to `main` and manual dispatch, uplo
 ```text
 bandwidth-saver/
 ├── manifest.json
-├── defaults.js
+├── defaults.js            # shared DEFAULTS + parseDomains() for popup/options
 ├── prehook.js             # MAIN-world synchronous interception
 ├── content.js             # ISOLATED-world storage + DOM processing
 ├── service-worker.js      # settings mirror, icon, stats, DNR CSP + Save-Data rules

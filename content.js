@@ -67,6 +67,9 @@
   const doneImg = new WeakSet();
   const doneLazy = new WeakSet();
   const doneBg = new WeakSet();
+  // style attribute value right after our own background rewrite, so the
+  // mutation record that write triggers is not re-parsed.
+  const ownStyle = new WeakMap();
   const ORIGINAL_SRC_ATTR = "data-bw-original-src";
   const ORIGINAL_SRCSET_ATTR = "data-bw-original-srcset";
   const RESTORED_ATTR = "data-bw-restored";
@@ -210,11 +213,7 @@
   // neither this layer nor the MAIN world reads it, so a Save-Data-only
   // change must not invalidate the proxy URL and srcset caches.
   // KEEP IN SYNC with prehook.js.
-  const domainKey = text => Array.from(new Set(
-    String(text || "").split(/[,\s]+/)
-      .map(s => s.trim().toLowerCase()).filter(Boolean)
-      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
-  )).sort().join(" ");
+  const domainKey = text => Array.from(domainSet(text)).sort().join(" ");
   const sameOpts = (a, b) => !!a && !!b &&
     a.enabled === b.enabled &&
     a.quality === b.quality &&
@@ -387,6 +386,15 @@
     return output;
   }
 
+  // Writes an attribute only when the value actually differs. A same-value
+  // setAttribute() still queues a mutation record, and for a mixed srcset
+  // (e.g. "icon.svg 1x, photo.jpg 2x", where one candidate is skipped) the
+  // mutation filter re-queues the element, so an unconditional write made
+  // content.js re-trigger itself on every macrotask forever.
+  function setIfChanged(el, name, current, next) {
+    if (next !== current) el.setAttribute(name, next);
+  }
+
   // ── A) <img src> and <source srcset> rewriting ────────────────────────────
   // Handles images whose src was set by the HTML parser (bypasses prehook).
   // Also handles srcset entries on both <img> and <source> elements.
@@ -394,6 +402,9 @@
 
   function rewriteImg(el) {
     if (!el || doneImg.has(el)) return;
+    // Only <img>/<source> are image candidates. Generic elements reach here via
+    // the data-*/style selectors; returning early keeps them out of doneImg.
+    if (el.tagName !== "IMG" && el.tagName !== "SOURCE") return;
     if (el.getAttribute(RESTORED_ATTR) === "1") return; // failed proxy: keep the restored original
     if (!opts?.enabled) return;
 
@@ -429,11 +440,10 @@
         }
       }
 
-      // srcset — cache the last value for this element. Setting the same
-      // value is a no-op attribute write; the srcset cache already short-
-      // circuits rewrites of identical input.
+      // srcset — the cache short-circuits re-parsing, and setIfChanged()
+      // avoids rewriting an identical value.
       const ss = el.getAttribute("srcset");
-      if (ss) el.setAttribute("srcset", rewriteSrcsetValue(ss, el, srcsetCache));
+      if (ss) setIfChanged(el, "srcset", ss, rewriteSrcsetValue(ss, el, srcsetCache));
     }
 
     // Mark done even when nothing was rewriteable (parity with rewriteBg):
@@ -469,7 +479,10 @@
     // A <source> outside <picture> is a media (video/audio) source, not an
     // image candidate — never proxy its lazy attributes (parity with the
     // src/srcset hooks in prehook.js, which are PICTURE-restricted).
-    if (el.tagName === "SOURCE" && el.parentElement?.tagName !== "PICTURE") return;
+    if (el.tagName === "SOURCE" && el.parentElement?.tagName !== "PICTURE") {
+      doneLazy.add(el);
+      return;
+    }
 
     // Inspect only attributes that actually exist instead of calling
     // getAttribute() for every possible lazy attribute on every element.
@@ -491,7 +504,7 @@
 
     // data-srcset — same per-element cache as normal srcset.
     const dss = el.getAttribute("data-srcset");
-    if (dss) el.setAttribute("data-srcset", rewriteSrcsetValue(dss, el, dataSrcsetCache));
+    if (dss) setIfChanged(el, "data-srcset", dss, rewriteSrcsetValue(dss, el, dataSrcsetCache));
 
     // Same re-arm as rewriteImg: nothing rewriteable right now still marks
     // the element done; a later attribute change arrives as a mutation that
@@ -507,13 +520,16 @@
     if (!el || doneBg.has(el)) return;
     if (el.getAttribute(RESTORED_ATTR) === "1") return; // failed proxy: keep the restored original
     if (!opts?.enabled) return;
-    const bg = el.style?.backgroundImage;
+    // No style attribute means no inline background (every el.style write
+    // reflects into the attribute), so skip creating a style declaration for
+    // the many <img>/<link>/lazy elements that never have one.
     // Mark done even without a background-image: elements matched by the
     // [style*='url(' i] selector can carry url(...) in non-background
     // properties (cursor, border-image, list-style). Without this they were
     // re-parsed on every mutation batch for the life of the page. A later
     // style change arrives as a mutation that deletes the element from
     // doneBg before reprocessing, so marking it done here is safe.
+    const bg = el.hasAttribute("style") ? el.style?.backgroundImage : "";
     if (!bg) { doneBg.add(el); return; }
 
     // Rewrite every HTTP(S) url(...) token while preserving gradients, CSS
@@ -526,8 +542,9 @@
       touched = true;
       return `url("${buildProxyUrl(u.href)}")`;
     });
-    if (touched && output !== bg) {
+    if (touched) {
       el.style.backgroundImage = output;
+      ownStyle.set(el, el.getAttribute("style"));
     }
     // Re-mark done either way so unrelated later style mutations don't re-run
     // the regex on every batch. A real change to background-image arrives as a
@@ -676,6 +693,8 @@
             imageTargets.add(t);
           }
         } else if (m.attributeName === "style") {
+          // Our own rewrite already produced this exact style value.
+          if (ownStyle.get(t) === t.getAttribute("style")) continue;
           doneBg.delete(t);
           bgTargets.add(t);
         } else if ((t.tagName === "IMG" ||
@@ -714,15 +733,17 @@
     // DOM after the bounded batch so missed attribute changes/additions are not
     // silently left unprocessed.
     for (const m of mutations) {
-      // href/rel/as/type records are only meaningful on <link> elements. The
-      // observer's attribute filter is document-wide, so drop the dead records
-      // (e.g. <a href> churn) before they consume the bounded queue and force
-      // early overflow reconciles.
-      if (m.type === "attributes" &&
-          (m.attributeName === "href" || m.attributeName === "rel" ||
-           m.attributeName === "as" || m.attributeName === "type") &&
-          m.target?.tagName !== "LINK") {
-        continue;
+      // The observer's attribute filter is document-wide, so drop records that
+      // processMutations() would ignore anyway (e.g. <a href>, <script src>,
+      // <iframe src>, <video src> churn) before they consume the bounded queue
+      // and force early overflow reconciles. href/rel/as/type only matter on
+      // <link>; src/srcset and lazy data-* only on <img>/<source>; style is
+      // kept for every element.
+      if (m.type === "attributes" && m.attributeName !== "style") {
+        const tag = m.target?.tagName;
+        const linkAttr = m.attributeName === "href" || m.attributeName === "rel" ||
+          m.attributeName === "as" || m.attributeName === "type";
+        if (linkAttr ? tag !== "LINK" : (tag !== "IMG" && tag !== "SOURCE")) continue;
       }
       if (pendingMutations.length >= MUTATION_RECORD_LIMIT) {
         mutationOverflowed = true;

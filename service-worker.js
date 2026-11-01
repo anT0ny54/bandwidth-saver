@@ -86,6 +86,7 @@ function mirrorToLocal() {
   const finish = function() {
     if (settled) return;
     settled = true;
+    clearTimeout(watchdog);
     mirroring = false;
     if (pendingMirror) {
       pendingMirror = false;
@@ -99,10 +100,6 @@ function mirrorToLocal() {
     console.warn("[Bandwidth Saver] Settings mirror timed out; releasing mirror guard.");
     finish();
   }, 5000);
-  const done = function() {
-    clearTimeout(watchdog);
-    finish();
-  };
   try {
     chrome.storage.sync.get(DEFAULTS, opts => {
       try {
@@ -110,15 +107,15 @@ function mirrorToLocal() {
         if (error) console.warn("[Bandwidth Saver] Failed to read settings for mirror:", error);
         // If sync failed and returned no snapshot, mirror the defaults so
         // content scripts still receive a usable settings object.
-        chrome.storage.local.set({ bhOpts: (opts && !error) ? opts : DEFAULTS }, done);
+        chrome.storage.local.set({ bhOpts: (opts && !error) ? opts : DEFAULTS }, finish);
       } catch {
-        done();
+        finish();
       }
     });
   } catch {
     // A synchronous throw (e.g. storage.sync unavailable) must not leave the
     // mirror guard stuck true forever.
-    done();
+    finish();
   }
 }
 
@@ -151,7 +148,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "sync") return;
   mirrorToLocal();
   if ("enabled" in changes || "excludeDomains" in changes || "saveData" in changes) refreshRules();
-  if ("enabled" in changes) updateIcon(!!changes.enabled.newValue);
+  // A removed key (newValue undefined) means the default applies, not "off".
+  if ("enabled" in changes) updateIcon(!!(changes.enabled.newValue ?? DEFAULTS.enabled));
 });
 
 // ── Extension icon ────────────────────────────────────────────────────────────
@@ -276,11 +274,24 @@ function flushStats() {
   };
 
   const persist = function(d) {
+    // The watchdog already returned this batch to pendingStats; writing it
+    // now as well would count the same observations twice.
+    if (settled) return;
     try {
-      const s = (d && d.stats) || emptyStats();
-      s.filesProcessed += delta.filesProcessed;
-      s.bytesProcessed += delta.bytesProcessed;
-      s.bytesSaved = (s.bytesSaved || 0) + delta.bytesSaved;
+      // A failed read must not fall through to a write: persisting just this
+      // delta over an unread total would wipe the accumulated statistics.
+      const readError = chrome.runtime.lastError?.message || "";
+      if (readError || !d) {
+        console.warn("[Bandwidth Saver] Failed to read stats:", readError || "no data");
+        finish(delta);
+        return;
+      }
+      // Totals written by older versions may lack a field; never let a
+      // missing/corrupt one turn the running sum into NaN.
+      const s = d.stats || emptyStats();
+      s.filesProcessed = (Number(s.filesProcessed) || 0) + delta.filesProcessed;
+      s.bytesProcessed = (Number(s.bytesProcessed) || 0) + delta.bytesProcessed;
+      s.bytesSaved = (Number(s.bytesSaved) || 0) + delta.bytesSaved;
       chrome.storage.local.set({ stats: s }, () => {
         const error = chrome.runtime.lastError?.message || "";
         if (error) console.warn("[Bandwidth Saver] Failed to flush stats:", error);
@@ -296,7 +307,7 @@ function flushStats() {
     chrome.storage.local.get({ stats: emptyStats() }, persist);
   } catch (error) {
     console.warn("[Bandwidth Saver] Failed to flush stats:", error);
-    persist(null);
+    finish(delta);
   }
 }
 
@@ -365,7 +376,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     statsFlushTimer = null;
   }
   statsResetPending = true;
-  if (typeof sendResponse === "function") statsResetResponders.push(sendResponse);
+  statsResetResponders.push(sendResponse);
   startStatsReset();
   return true;
 });
@@ -399,14 +410,9 @@ function onProxyCompleted({ responseHeaders, fromCache, statusCode }) {
 // (e.g. await chrome.storage.sync.get()) is not available in classic
 // (non-module) service workers on Kiwi/Cromite and causes Status code: 2.
 
-function doRefreshRules(done) {
-  let settled = false;
-  const finish = function() {
-    if (settled) return;
-    settled = true;
-    done();
-  };
-
+// `finish` is idempotent (see refreshRules), so it can be called from every
+// exit path without a second guard here.
+function doRefreshRules(finish) {
   try {
     chrome.storage.sync.get(DEFAULTS, function(rawOpts) {
       // One guard around rule-building AND the updateDynamicRules call: a

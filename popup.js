@@ -1,4 +1,4 @@
-import { DEFAULTS } from "./defaults.js";
+import { DEFAULTS, parseDomains } from "./defaults.js";
 
 const $ = id => document.getElementById(id);
 
@@ -25,16 +25,7 @@ let currentIsWeb = false;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function parseDomains(text) {
-  return String(text || "")
-    .split(/[,\s]+/)
-    .map(s => s.trim().toLowerCase()).filter(Boolean)
-    .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""));
-}
-
-function findExcludedDomain(host, domains) {
-  return domains.find(domain => host === domain || host.endsWith(`.${domain}`)) || "";
-}
+const coversHost = (host, domain) => host === domain || host.endsWith(`.${domain}`);
 
 function setActivePreset(q) {
   // Custom qualities should not masquerade as the closest built-in preset.
@@ -174,7 +165,7 @@ async function loadSiteUI(d) {
   excludeBtn.disabled = false;
 
   const excluded = parseDomains(d.excludeDomains);
-  if (findExcludedDomain(currentHost, excluded)) {
+  if (excluded.some(domain => coversHost(currentHost, domain))) {
     sitePillEl.textContent = "Excluded";
     sitePillEl.className   = "site-pill";
     sitePillEl.style.display = "";
@@ -192,8 +183,11 @@ excludeBtn.addEventListener("click", async () => {
   // `state` is kept current by the storage.onChanged listener below, so no
   // redundant storage.sync read is needed here.
   const list = new Set(parseDomains(state.excludeDomains));
-  const excludedDomain = findExcludedDomain(currentHost, Array.from(list));
-  if (excludedDomain) list.delete(excludedDomain);
+  const covering = Array.from(list).filter(domain => coversHost(currentHost, domain));
+  // Re-including must drop EVERY entry that covers this host (e.g. both
+  // "example.com" and "www.example.com"); removing only the first left the
+  // site excluded while the button claimed otherwise.
+  if (covering.length) covering.forEach(domain => list.delete(domain));
   else list.add(currentHost);
   const excludeDomains = Array.from(list).join(" ");
   try {
@@ -236,5 +230,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
   // Apply directly from the change payload — no redundant storage re-read.
   for (const [k, v] of Object.entries(changes)) state[k] = v.newValue ?? DEFAULTS[k];
   applyUI(state);
-  if ("excludeDomains" in changes || "enabled" in changes) loadSiteUI(state);
+  if ("excludeDomains" in changes) loadSiteUI(state);
 });

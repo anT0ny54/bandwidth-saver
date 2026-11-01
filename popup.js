@@ -74,7 +74,7 @@ async function load() {
     state = { ...DEFAULTS };
   }
   applyUI(state);
-  loadSiteUI(state);
+  detectSite().then(() => renderSiteUI(state));
 }
 load();
 
@@ -135,7 +135,9 @@ reloadBtn.addEventListener("click", async () => {
 
 // ── Site card ─────────────────────────────────────────────────────────────────
 
-async function loadSiteUI(d) {
+// The active tab cannot change while the popup is open, so it is resolved once;
+// later exclusion-list changes only re-render the pill/button.
+async function detectSite() {
   let tab;
   try { [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); }
   catch { return; }
@@ -150,10 +152,7 @@ async function loadSiteUI(d) {
   try { parsed = new URL(tab.url); }
   catch { siteNameEl.textContent = "Unknown"; excludeBtn.disabled = true; return; }
 
-  currentIsWeb = parsed.protocol === "http:" || parsed.protocol === "https:";
-  currentHost  = parsed.hostname.toLowerCase();
-
-  if (!currentIsWeb) {
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     siteNameEl.textContent = parsed.protocol.replace(":", "") + " page";
     sitePillEl.style.display = "none";
     excludeBtn.textContent = "Not a web page";
@@ -161,13 +160,17 @@ async function loadSiteUI(d) {
     return;
   }
 
+  currentIsWeb = true;
+  currentHost  = parsed.hostname.toLowerCase();
   siteNameEl.textContent = currentHost;
   excludeBtn.disabled = false;
+}
 
+function renderSiteUI(d) {
+  if (!currentIsWeb) return;
   const excluded = parseDomains(d.excludeDomains);
   if (excluded.some(domain => coversHost(currentHost, domain))) {
     sitePillEl.textContent = "Excluded";
-    sitePillEl.className   = "site-pill";
     sitePillEl.style.display = "";
     excludeBtn.textContent = "✕ Remove exclusion";
   } else {
@@ -193,11 +196,11 @@ excludeBtn.addEventListener("click", async () => {
   try {
     await chrome.storage.sync.set({ excludeDomains });
   } catch {
-    loadSiteUI(state); // storage did not change; restore the current pill/button
+    renderSiteUI(state); // storage did not change; restore the current pill/button
     return;
   }
   state.excludeDomains = excludeDomains;
-  loadSiteUI(state); // refresh the pill/button immediately
+  renderSiteUI(state); // refresh the pill/button immediately
   showNudge(); // page must reload for the change to take effect
 });
 
@@ -230,5 +233,5 @@ chrome.storage.onChanged.addListener((changes, area) => {
   // Apply directly from the change payload — no redundant storage re-read.
   for (const [k, v] of Object.entries(changes)) state[k] = v.newValue ?? DEFAULTS[k];
   applyUI(state);
-  if ("excludeDomains" in changes) loadSiteUI(state);
+  if ("excludeDomains" in changes) renderSiteUI(state);
 });

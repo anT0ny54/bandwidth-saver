@@ -122,12 +122,12 @@ function mirrorToLocal() {
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(function() {
-  // Top-level mirrorToLocal() already ran on this worker start and seeded the
-  // local mirror. Only seed sync keys that are genuinely missing. get(null)
-  // returns actually-stored keys only — with get(DEFAULTS) the defaults are
-  // pre-filled and "missing" can never be detected. Re-writing the full
-  // merged snapshot on every install/update was a wasted write plus a
-  // redundant second mirror pass. Guarded like every other storage call.
+  // Top-level mirrorToLocal() already seeded the local mirror on this worker
+  // start, and writing the missing sync keys fires storage.onChanged below,
+  // which re-mirrors and refreshes the rules — no extra mirror pass is needed.
+  // Only seed keys that are genuinely missing: get(null) returns actually-stored
+  // keys only, whereas get(DEFAULTS) pre-fills defaults so "missing" could never
+  // be detected. Guarded like every other storage call.
   try {
     chrome.storage.sync.get(null, function(all) {
       const stored = all || {};
@@ -135,13 +135,12 @@ chrome.runtime.onInstalled.addListener(function() {
       for (const k of Object.keys(DEFAULTS)) {
         if (!(k in stored)) missing[k] = DEFAULTS[k];
       }
-      if (!Object.keys(missing).length) return; // mirror already seeded at worker start
-      const seed = function() { try { mirrorToLocal(); } catch {} };
-      try { chrome.storage.sync.set(missing, seed); } catch { seed(); }
+      if (!Object.keys(missing).length) return;
+      try {
+        chrome.storage.sync.set(missing, function() { void chrome.runtime.lastError; });
+      } catch {}
     });
-  } catch {
-    try { mirrorToLocal(); } catch {}
-  }
+  } catch {}
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -424,7 +423,7 @@ function doRefreshRules(finish) {
         // Excluded sites are never proxied, so they keep their own CSP. DNR rejects the
         // whole update on an invalid domain, so only well-formed hostnames are passed.
         const excluded = String(opts.excludeDomains || "").split(/[,\s]+/)
-          .map(function(s) { return s.trim().toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""); })
+          .map(function(s) { return s.toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""); })
           .filter(function(s) { return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(s); });
         const excludedDomainList = Array.from(new Set(excluded));
         const cspCondition = { resourceTypes: ["main_frame", "sub_frame"] };

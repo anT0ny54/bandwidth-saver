@@ -6,8 +6,6 @@
 //   convertBw: true  → grayscale: true
 //   Normal quality preset: 60
 
-// proxyBase was removed: the proxy is hardcoded (WSRV_PROXY) in content.js and
-// prehook.js, and no code path reads a stored proxyBase anymore.
 export const DEFAULTS = {
   enabled:        true,
   saveData:       true,   // Send Save-Data: on on web requests
@@ -24,7 +22,7 @@ export const DEFAULTS = {
 export function parseDomains(text) {
   return String(text || "")
     .split(/[,\s]+/)
-    .map(s => s.trim().toLowerCase()).filter(Boolean)
+    .map(s => s.toLowerCase()).filter(Boolean)
     .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
     .filter(Boolean);
 }

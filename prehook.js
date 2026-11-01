@@ -52,7 +52,7 @@
   const toDomainSet = text => new Set(
     String(text || "")
       .split(/[\s,]+/)
-      .map(s => s.trim().toLowerCase())
+      .map(s => s.toLowerCase())
       .filter(Boolean)
       .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
   );
@@ -163,8 +163,6 @@
   }
 
   function buildProxyUrl(orig) {
-    if (!proxyConfig) return orig;
-
     const cached = proxyUrlCache.get(orig);
     if (cached) {
       // LRU touch: re-insert so frequently-hit URLs are evicted last (Map

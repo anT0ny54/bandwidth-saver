@@ -99,3 +99,47 @@ All notable changes to this project will be documented in this file.
   the `findExcludedDomain` helper (replaced by one shared `coversHost` test),
   a redundant `|| 0` in `options.js` stats rendering, a double space in the
   `#widthPresets` selector, and the unused `site` class in `popup.html`.
+- Fifth full audit (every file read end-to-end; `build.sh` baseline verified
+  before and after the edits below, plus a jsdom smoke test of `content.js`).
+- Fixed `content.js` ignoring a changed `srcset`/`data-srcset` whose FIRST
+  candidate is skipped (excluded host, `favicon`, …) even when a later candidate
+  was rewriteable: the mutation filter resolved the whole string as one URL, so
+  only the first candidate decided. It now checks every candidate
+  (`hasRewriteableUrl`); the element's own proxy writes still yield nothing
+  rewriteable, so no self-trigger loop is reintroduced.
+- Fixed `content.js` throwing on `d.bhOpts` when the `storage.local` read failed
+  (`lastError`, `d` undefined): the `sync` fallback never ran, leaving page
+  images unproxied until the 800 ms failsafe applied defaults instead of the
+  user's settings. The read failure now falls through to `storage.sync`.
+- Removed redundant code: `content.js`'s `nativeImgSrcSetter` (an isolated world
+  has its own DOM wrappers, so MAIN-world prehook patches never run for its
+  writes — its comment was wrong and `restoreOriginalImage` branched on it for
+  no reason); the no-op `.trim()` after splitting on whitespace in the four
+  domain parsers (`defaults.js`, `content.js`, `prehook.js`,
+  `service-worker.js`); the duplicate mirror pass in `onInstalled` (writing the
+  missing sync keys already fires `storage.onChanged`, which re-mirrors and
+  refreshes the rules); the redundant `className` reset in `popup.js`; and a
+  stale `proxyBase` comment in `defaults.js`.
+- README: documented the `storage.local` read-failure fallback and the
+  per-candidate `srcset` mutation check; the project tree now mentions the
+  keep-alive workflow.
+- Sixth full audit (every file read end-to-end; `build.sh` baseline verified
+  before and after the edits below).
+- Fixed `content.js` proxying non-URL lazy attributes: flag-style values such as
+  `data-lazy="true"` or `data-echo="1"` resolve as a relative URL
+  (`https://host/true`), so they were rewritten into a proxy URL and the flag
+  was corrupted. Lazy attributes (and their mutation filter) now require a
+  value containing a `/` or `.`.
+- Optimized `content.js`: added DOM roots nested inside another added root of
+  the same mutation batch are skipped. The parser reports every streamed node
+  as an added root of its parent, so each nested root used to re-run
+  `querySelectorAll` over its subtree once per ancestor.
+- Optimized `popup.js`: the active tab is resolved once (`detectSite`); later
+  exclusion-list changes only re-render the pill/button (`renderSiteUI`)
+  instead of repeating `tabs.query` and URL parsing.
+- Removed redundant code: the unreachable `if (!proxyConfig) return orig`
+  guard in `buildProxyUrl` (both `content.js` and `prehook.js`; callers only
+  run after settings are applied) and the two identical `<img>`/`<source>`
+  `src` branches in `content.js` `rewriteImg`.
+- README: documented the lazy-attribute URL check, nested-root skipping, and
+  the single popup tab lookup.

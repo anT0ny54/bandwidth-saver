@@ -122,7 +122,7 @@
   function domainSet(text) {
     return new Set(
       String(text || "").split(/[,\s]+/)
-        .map(s => s.trim().toLowerCase()).filter(Boolean)
+        .map(s => s.toLowerCase()).filter(Boolean)
         .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
     );
   }
@@ -223,8 +223,6 @@
     domainKey(a.excludeDomains) === domainKey(b.excludeDomains);
 
   function buildProxyUrl(orig) {
-    if (!proxyConfig) return orig;
-
     const cached = proxyUrlCache.get(orig);
     if (cached) {
       // LRU touch: re-insert so frequently-hit URLs are evicted last (Map
@@ -347,17 +345,9 @@
     doneImg.add(el);
     doneLazy.add(el);
 
-    if (el.tagName === "IMG") {
-      if (srcset) el.setAttribute("srcset", srcset);
-      if (src) {
-        if (nativeImgSrcSetter) nativeImgSrcSetter.call(el, src);
-        else el.setAttribute("src", src);
-      }
-    } else {
-      // <SOURCE>: tagName was validated above, so this branch is the only one left.
-      if (srcset) el.setAttribute("srcset", srcset);
-      if (src) el.setAttribute("src", src);
-    }
+    // IMG and SOURCE restore identically (tagName was validated above).
+    if (srcset) el.setAttribute("srcset", srcset);
+    if (src) el.setAttribute("src", src);
     el.removeAttribute(ORIGINAL_SRC_ATTR);
     el.removeAttribute(ORIGINAL_SRCSET_ATTR);
     return true;
@@ -398,7 +388,6 @@
   // ── A) <img src> and <source srcset> rewriting ────────────────────────────
   // Handles images whose src was set by the HTML parser (bypasses prehook).
   // Also handles srcset entries on both <img> and <source> elements.
-  const nativeImgSrcSetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "src")?.set;
 
   function rewriteImg(el) {
     if (!el || doneImg.has(el)) return;
@@ -417,27 +406,15 @@
 
     if (el.tagName === "IMG" ||
         (el.tagName === "SOURCE" && el.parentElement?.tagName === "PICTURE")) {
-      // src
-      if (el.tagName === "IMG") {
-        const src = el.getAttribute("src");
-        const u = src ? resolveImage(src) : null;
-        if (u && !shouldSkip(u) && nativeImgSrcSetter) {
-          // Use the native setter so this isolated-world rewrite cannot recurse
-          // through the MAIN-world prehook.
-          rememberOriginal(el, u.href, null);
-          nativeImgSrcSetter.call(el, buildProxyUrl(u.href));
-        }
-      } else {
-        // Enclosing if already established <picture><source>: parser-created
-        // <source src> bypasses prehook's property
-        // patch, so handle it here like <img src>. Restrict to <picture>
-        // parents so media <source> elements are never treated as images.
-        const src = el.getAttribute("src");
-        const u = src ? resolveImage(src) : null;
-        if (u && !shouldSkip(u)) {
-          rememberOriginal(el, u.href, null);
-          el.setAttribute("src", buildProxyUrl(u.href));
-        }
+      // src — <img> and <picture><source> are handled identically. Parser-
+      // created values bypass prehook's property patches, and this isolated
+      // world has its own DOM wrappers, so the MAIN-world hooks never run for
+      // this write. Media <source> elements never reach here.
+      const src = el.getAttribute("src");
+      const u = src ? resolveImage(src) : null;
+      if (u && !shouldSkip(u)) {
+        rememberOriginal(el, u.href, null);
+        el.setAttribute("src", buildProxyUrl(u.href));
       }
 
       // srcset — the cache short-circuits re-parsing, and setIfChanged()
@@ -457,6 +434,11 @@
   // Generic data-src/data-url attributes are intentionally left untouched
   // because their payload can be video, audio, documents, pages, scripts,
   // embeds, navigation URLs, or other non-image resources.
+  // Lazy attributes such as data-lazy / data-echo are often boolean-style flags
+  // ("true", "1", "lazy"). A relative URL resolves any bare word to a bogus
+  // https://host/true, which would then be proxied and corrupt the flag. A real
+  // image URL or path always contains a slash or a dot.
+  const LAZY_URL_HINT_RE = /[/.]/;
   const NON_IMAGE_EXT_RE = /\.(?:mp4|webm|m3u8|mpd|mp3|ogg|wav|js|mjs|css|json|html?|php|pdf|zip|woff2?|ttf)(?:[?#]|$)/i;
 
   function rewriteLazy(el) {
@@ -489,7 +471,7 @@
     for (const attr of Array.from(el.attributes)) {
       if (!lazyAttrSet.has(attr.name)) continue;
       const val = attr.value;
-      const u = val ? resolveImage(val) : null;
+      const u = val && LAZY_URL_HINT_RE.test(val) ? resolveImage(val) : null;
       if (!u || NON_IMAGE_EXT_RE.test(u.href) || shouldSkip(u)) continue;
       // LAZY_ATTRS never contains a srcset attribute (data-srcset is handled
       // separately below), so only the original src is remembered here.
@@ -626,6 +608,24 @@
 
   const CANDIDATE_SELECTOR = ["img", "source", LAZY_SELECTOR, "[style*='url(' i]", 'link[rel~="preload"]'].join(",");
 
+  // True when an attribute value still holds at least one rewriteable image URL.
+  // srcset-style values are inspected candidate by candidate: resolving the whole
+  // string as one URL only ever tested the FIRST candidate, so a list such as
+  // "logo.svg 1x, photo.jpg 2x" was ignored after an attribute mutation. Our own
+  // proxy writes yield only skipped (wsrv) candidates, so they still return false.
+  function hasRewriteableUrl(value, isSrcset, lazy = false) {
+    if (!value) return false;
+    if (!isSrcset) {
+      if (lazy && !LAZY_URL_HINT_RE.test(value)) return false;
+      const u = resolveImage(value);
+      return !!u && !shouldSkip(u);
+    }
+    return parseSrcset(value).some(({ url }) => {
+      const u = resolveImage(url);
+      return !!u && !shouldSkip(u);
+    });
+  }
+
   // ── Full-page scan ────────────────────────────────────────────────────────
   function processCandidate(el) {
     rewriteImg(el);
@@ -686,9 +686,7 @@
           if (t.getAttribute(RESTORED_ATTR) === "1") continue;
           // Ignore mutations produced by our own proxy writes. Reprocessing a
           // wsrv/excluded value only creates more observer work.
-          const cur = t.getAttribute(m.attributeName);
-          const u = cur ? resolveImage(cur) : null;
-          if (u && !shouldSkip(u)) {
+          if (hasRewriteableUrl(t.getAttribute(m.attributeName), m.attributeName === "srcset")) {
             doneImg.delete(t);
             imageTargets.add(t);
           }
@@ -704,9 +702,11 @@
           if (t.getAttribute(RESTORED_ATTR) === "1") continue;
           // Ignore records produced by our own proxy writes — same guard the
           // src/srcset branch applies above.
-          const cur = t.getAttribute(m.attributeName);
-          const u = cur ? resolveImage(cur) : null;
-          if (u && !shouldSkip(u)) { doneLazy.delete(t); lazyTargets.add(t); }
+          if (hasRewriteableUrl(t.getAttribute(m.attributeName), m.attributeName === "data-srcset",
+                                m.attributeName !== "data-srcset")) {
+            doneLazy.delete(t);
+            lazyTargets.add(t);
+          }
         } else if (t.tagName === "LINK" &&
                    (m.attributeName === "href" || m.attributeName === "rel" || m.attributeName === "as" || m.attributeName === "type")) {
           preloadTargets.add(t);
@@ -714,7 +714,19 @@
       }
     }
 
+    // The parser reports every node of a streamed subtree as an added root of
+    // its parent, so a nested root would be re-queried once per ancestor
+    // (quadratic on deep pages). An ancestor root's querySelectorAll already
+    // covers every candidate below it, so nested roots are skipped.
+    const rootSet = addedRoots.length > 1 ? new Set(addedRoots) : null;
     for (const root of addedRoots) {
+      if (rootSet) {
+        let covered = false;
+        for (let p = root.parentElement; p; p = p.parentElement) {
+          if (rootSet.has(p)) { covered = true; break; }
+        }
+        if (covered) continue;
+      }
       processCandidate(root);
       root.querySelectorAll?.(CANDIDATE_SELECTOR).forEach(processCandidate);
     }
@@ -808,7 +820,9 @@
   try {
     chrome.storage.local.get({ bhOpts: null }, d => {
       if (destroyed) return;
-      if (d.bhOpts) {
+      // On a failed read `d` is undefined (lastError); fall through to sync.
+      void chrome.runtime.lastError;
+      if (d?.bhOpts) {
         applyOpts(d.bhOpts);
         publishSettings();
       } else {

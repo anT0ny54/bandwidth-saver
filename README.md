@@ -19,7 +19,7 @@
 - **JSON/DOM-event settings bridge** from isolated `content.js` to MAIN-world `prehook.js`.
 - **Temporary parking** of page-created images, `srcset`, image preloads, and loading assignments until settings arrive.
 - **Normal images and `srcset`** including `<picture>` / `<source>` candidates.
-- **Lazy-loading attributes:** `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset` — rewritten **only** on `<img>` and `<picture><source>` elements. Generic elements are left untouched (their `data-*` payloads can be video, pages, or scripts), and media `<source>` elements inside `<video>`/`<audio>` pass through untouched, including while settings are still loading.
+- **Lazy-loading attributes:** `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset` — rewritten **only** on `<img>` and `<picture><source>` elements, and only when the value looks like a URL or path (contains a `/` or `.`), so flag-style values such as `data-lazy="true"` are never turned into a proxied `https://host/true`. Generic elements are left untouched (their `data-*` payloads can be video, pages, or scripts), and media `<source>` elements inside `<video>`/`<audio>` pass through untouched, including while settings are still loading.
 - **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`. The MAIN-world hook rewrites or parks URLs before activating a preload when possible. Both layers retain the original URL and restore it if the link is repurposed, including preloads the MAIN-world hook parked on `about:blank` with the original stashed in `data-bh-preload-href` while settings were loading. The isolated layer never restores a parked preload before settings are known, so parking cannot be undone early by a mutation batch racing the storage read.
 - **Inline CSS backgrounds:** best-effort rewriting of HTTP(S) `url(...)` values in inline `background-image`.
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
@@ -27,7 +27,7 @@
 - **Configurable quality, grayscale, maximum width, and excluded domains.**
 - **Consistent exclusion parsing:** excluded domains accept space, comma, or any whitespace separation; optional schemes/paths, leading dots, and trailing dots are normalized identically in the popup, settings page (both via the shared `parseDomains()` in `defaults.js`, which also drops entries that normalize to nothing, such as a bare `https://`), isolated content script, MAIN-world prehook, and DNR rule code.
 - **Double-proxy protection:** wsrv.nl URLs are never wrapped again.
-- **Bounded URL/cache work:** proxy URL caches are capped, srcset work is cached per element, the device-pixel-ratio clamp is computed once per settings change, ambiguous lazy attributes on generic non-image elements are dropped before URL resolution, mutation records that cannot affect any rewrite (e.g. `<a href>`, `<script src>`, `<iframe src>`, `<video src>` churn) are filtered out before they reach the bounded queue, elements with nothing left to rewrite stay marked done so full-page rescans skip them, `srcset`/`data-srcset` attributes are written only when the rewritten value differs (so a mixed list such as `icon.svg 1x, photo.jpg 2x` cannot make the content script re-trigger itself), the style mutation caused by the script's own inline-background rewrite is not re-parsed, non-image elements and elements without a `style` attribute are skipped before any image/background work, and the MAIN-world `setAttribute` hook exits immediately for every attribute it does not intercept.
+- **Bounded URL/cache work:** proxy URL caches are capped, srcset work is cached per element, the device-pixel-ratio clamp is computed once per settings change, ambiguous lazy attributes on generic non-image elements are dropped before URL resolution, nested added DOM roots are skipped because an ancestor's scan already covers them (no quadratic rescans while the parser streams a deep subtree), mutation records that cannot affect any rewrite (e.g. `<a href>`, `<script src>`, `<iframe src>`, `<video src>` churn) are filtered out before they reach the bounded queue (a changed `srcset`/`data-srcset` is kept when **any** candidate is still rewriteable, not just the first), elements with nothing left to rewrite stay marked done so full-page rescans skip them, `srcset`/`data-srcset` attributes are written only when the rewritten value differs (so a mixed list such as `icon.svg 1x, photo.jpg 2x` cannot make the content script re-trigger itself), the style mutation caused by the script's own inline-background rewrite is not re-parsed, non-image elements and elements without a `style` attribute are skipped before any image/background work, and the MAIN-world `setAttribute` hook exits immediately for every attribute it does not intercept.
 - **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup. Partial/older mirrors are merged with the shared defaults before use.
 - **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms; a failed read of the stored totals keeps the batch for retry instead of overwriting the totals with it, a batch already returned by the watchdog is never written a second time, and missing/corrupt stored totals are treated as zero instead of producing `NaN`; resetting statistics clears the worker's pending batch and waits out an in-flight flush. Storage failures release the worker's internal locks without dropping the in-memory batch or leaving later settings updates stuck; storage callbacks that are silently dropped are covered by watchdog timers on the mirror, flush, reset, and DNR rule-refresh guards.
 - **Live settings updates:** an open settings page follows synced setting changes, resets, and newly flushed statistics. The toolbar icon follows the `enabled` setting, and a removed `enabled` key falls back to the default (on).
@@ -115,7 +115,7 @@ __BANDWIDTH_SAVER_SETTINGS__
 
 No JavaScript object, storage object, or `chrome.*` API crosses the world boundary.
 
-The service worker maintains the `bhOpts` local mirror from `storage.sync`. If the mirror is missing, `content.js` falls back to `storage.sync`, writes the mirror, and publishes the settings. A short failsafe timer is registered before the first storage read and publishes the shared defaults when neither storage read returns, so a synchronous storage failure or delayed callback cannot strand images parked on `about:blank`. Both worlds merge incoming settings with the shared defaults so a partial mirror from an older version does not prevent the MAIN-world hooks from becoming ready.
+The service worker maintains the `bhOpts` local mirror from `storage.sync`. If the mirror is missing or the `storage.local` read fails, `content.js` falls back to `storage.sync`, writes the mirror, and publishes the settings. A short failsafe timer is registered before the first storage read and publishes the shared defaults when neither storage read returns, so a synchronous storage failure or delayed callback cannot strand images parked on `about:blank`. Both worlds merge incoming settings with the shared defaults so a partial mirror from an older version does not prevent the MAIN-world hooks from becoming ready.
 
 ### `content.js` — ISOLATED world
 
@@ -213,7 +213,7 @@ The popup provides:
 - enable/disable
 - grayscale
 - quality presets
-- current-site exclusion (re-including a site removes every exclusion entry that covers it, e.g. both `example.com` and `www.example.com`)
+- current-site exclusion (the active tab is resolved once per popup session; re-including a site removes every exclusion entry that covers it, e.g. both `example.com` and `www.example.com`)
 - page reload
 - settings-page access
 
@@ -308,7 +308,7 @@ bandwidth-saver/
 ├── icons/
 ├── _locales/en/
 ├── build.sh
-├── .github/workflows/
+├── .github/workflows/     # build/release + keep-alive
 ├── CHANGELOG.md
 └── LICENSE
 ```

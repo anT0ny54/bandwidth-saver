@@ -67,7 +67,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')"
+          VERSION="${{ steps.version.outputs.version }}"
           ZIP="dist/bandwidth-saver-${VERSION}.zip"
 
           if gh release view "v${VERSION}" >/dev/null 2>&1; then

@@ -98,16 +98,19 @@ def const_block(src, name):
 
 def fn_block(src, name):
     # Match the function's OWN closing brace. Ignore braces in strings and
-    # comments so source text cannot truncate the parity comparison. The
-    # checked helpers contain no brace-quantifier regular expressions.
+    # comments so source text cannot truncate the parity comparison. Template
+    # literal ${...} interpolations are scanned as code (they can contain
+    # string/comment delimiters and braces), so drift hidden inside an
+    # interpolation is caught instead of being swallowed as opaque text.
     m = re.search(rf"function\s+{name}\s*\([^)]*\)\s*\{{", src)
     if not m:
         return None
     depth, i = 1, m.end()
-    quote = None
-    escaped = False
+    quote = None        # current '…' / "…" / `…` literal, or None
+    escaped = False     # previous char was a backslash inside a literal
     line_comment = False
     block_comment = False
+    tpl_stack = []      # brace depth at each nested ${...} inside a template
     while i < len(src) and depth:
         ch = src[i]
         nxt = src[i + 1] if i + 1 < len(src) else ""
@@ -127,6 +130,14 @@ def fn_block(src, name):
                 escaped = False
             elif ch == "\\":
                 escaped = True
+            elif quote == "`" and ch == "$" and nxt == "{":
+                # Enter a ${...} interpolation: resume code scanning at the
+                # opening brace so nested strings/comments/braces count.
+                tpl_stack.append(depth)
+                depth += 1
+                quote = None
+                i += 2
+                continue
             elif ch == quote:
                 quote = None
             i += 1
@@ -140,14 +151,16 @@ def fn_block(src, name):
             i += 2
             continue
         if ch in ("'", '"', "`"):
-            # Treat the complete template literal as string content; braces
-            # inside ${...} are balanced within the literal and not function
-            # delimiters.
             quote = ch
         elif ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
+            if tpl_stack and depth == tpl_stack[-1]:
+                # Closing brace of a ${...} interpolation: back to the
+                # surrounding template literal.
+                tpl_stack.pop()
+                quote = "`"
         i += 1
     return strip_comments(src[m.start():i]) if not depth else None
 

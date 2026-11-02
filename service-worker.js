@@ -105,6 +105,10 @@ function mirrorToLocal() {
   // it instead of reporting an error), release the guard so later settings
   // changes are not stuck behind a dead lock forever.
   const watchdog = setTimeout(function() {
+    // Invalidate a sync-read callback that arrives after this timeout so a
+    // stale snapshot cannot overwrite a newer local mirror (parity with the
+    // refreshRules watchdog).
+    if (generation === mirrorGeneration) mirrorGeneration++;
     console.warn("[Bandwidth Saver] Settings mirror timed out; releasing mirror guard.");
     finish();
   }, 5000);
@@ -225,7 +229,7 @@ function updateIcon(enabled) {
 // Non-blocking — only observes, never delays requests.
 // Reused for the rare binaryValue header delivery; TextDecoder is stateless
 // for single-shot decodes, so one shared instance is safe.
-let headerDecoder = null;
+const headerDecoder = new TextDecoder();
 
 function getHeaderInt(headers, name) {
   if (!Array.isArray(headers)) return null;
@@ -237,7 +241,6 @@ function getHeaderInt(headers, name) {
   // string value; decode those instead of silently dropping the response.
   if (typeof value !== "string" && h.binaryValue) {
     try {
-      headerDecoder || (headerDecoder = new TextDecoder());
       value = headerDecoder.decode(new Uint8Array(h.binaryValue));
     } catch {
       return null;
@@ -258,6 +261,12 @@ if (chrome.webRequest) {
   );
 }
 
+// A fork whose storage.local never answers would otherwise retry the same
+// failed batch every 750 ms forever, logging a warning on every pass. Cap
+// consecutive flush failures; the counter resets on the next successful write
+// and is untouched by the reset flow (which discards the batch by design).
+const MAX_STATS_FLUSH_FAILURES = 3;
+let statsFlushFailures = 0;
 let pendingStats = emptyStats();
 let statsFlushTimer = null;
 let statsFlushInProgress = false;
@@ -292,12 +301,26 @@ function flushStats() {
     clearTimeout(watchdog);
     statsFlushInProgress = false;
 
-    // Preserve observations when the write fails outside a reset so a later
-    // flush can retry instead of silently dropping the batch.
-    if (retryDelta && !statsResetPending) {
-      pendingStats.filesProcessed += retryDelta.filesProcessed;
-      pendingStats.bytesProcessed += retryDelta.bytesProcessed;
-      pendingStats.bytesSaved += retryDelta.bytesSaved;
+    if (retryDelta) {
+      // Preserve observations when the write fails outside a reset so a later
+      // flush can retry instead of silently dropping the batch — but only up
+      // to MAX_STATS_FLUSH_FAILURES consecutive attempts, after which the batch
+      // is dropped with one warning instead of retrying every 750 ms forever.
+      // During a reset the batch is discarded by design and must not count.
+      if (!statsResetPending) {
+        if (statsFlushFailures < MAX_STATS_FLUSH_FAILURES) {
+          statsFlushFailures++;
+          pendingStats.filesProcessed += retryDelta.filesProcessed;
+          pendingStats.bytesProcessed += retryDelta.bytesProcessed;
+          pendingStats.bytesSaved += retryDelta.bytesSaved;
+        } else {
+          console.warn("[Bandwidth Saver] Stats batch dropped after " +
+            MAX_STATS_FLUSH_FAILURES + " failed flush attempts.");
+          statsFlushFailures = 0;
+        }
+      }
+    } else {
+      statsFlushFailures = 0;
     }
 
     if (statsResetPending) {
@@ -320,12 +343,26 @@ function flushStats() {
         finish(delta);
         return;
       }
-      // Totals written by older versions may lack a field; never let a
-      // missing/corrupt one turn the running sum into NaN.
-      const s = d.stats || emptyStats();
-      s.filesProcessed = (Number(s.filesProcessed) || 0) + delta.filesProcessed;
-      s.bytesProcessed = (Number(s.bytesProcessed) || 0) + delta.bytesProcessed;
-      s.bytesSaved = (Number(s.bytesSaved) || 0) + delta.bytesSaved;
+      // Older or corrupted storage may contain missing fields, non-finite
+      // values, or even a primitive/array instead of the expected object.
+      // Normalize the complete record before adding this batch so no bad value
+      // can poison future totals or silently discard writes to a primitive.
+      const stored = d.stats && typeof d.stats === "object" && !Array.isArray(d.stats)
+        ? d.stats : {};
+      const finite = value => {
+        if (typeof value !== "number" && typeof value !== "string") return 0;
+        if (typeof value === "string" && value.trim() === "") return 0;
+        const number = Number(value);
+        return Number.isFinite(number) ? number : 0;
+      };
+      const s = {
+        filesProcessed: Math.max(0, Math.trunc(finite(stored.filesProcessed))),
+        bytesProcessed: Math.max(0, finite(stored.bytesProcessed)),
+        bytesSaved: finite(stored.bytesSaved)
+      };
+      s.filesProcessed += delta.filesProcessed;
+      s.bytesProcessed += delta.bytesProcessed;
+      s.bytesSaved += delta.bytesSaved;
       chrome.storage.local.set({ stats: s }, () => {
         const error = chrome.runtime.lastError?.message || "";
         if (error) console.warn("[Bandwidth Saver] Failed to flush stats:", error);
@@ -532,9 +569,21 @@ function doRefreshRules(finish, generation) {
           { removeRuleIds: ALL_RULE_IDS, addRules: addRules },
           function() {
             if (generation !== refreshGeneration) {
-              // The request may have reached DNR after its watchdog expired.
-              // Schedule a fresh read/update so the active settings win last.
-              refreshRules();
+              // The request reached DNR after its watchdog expired or a newer
+              // refresh started. Release this guard before scheduling the fresh
+              // refresh — returning without finish() left `refreshing` true and
+              // wedged every later rules refresh behind it until the 5-second
+              // watchdog fired. finish() is idempotent, so the call is safe
+              // when this operation already completed via its watchdog.
+              // Capture BEFORE finish(): finish() resets the shared `refreshing`
+              // guard, so a check afterwards could never detect a newer refresh
+              // already in flight and would always queue a redundant rebuild.
+              const superseded = refreshing;
+              finish();
+              // When a newer refresh is already running, its ruleset supersedes
+              // this stale one: rescheduling would only queue a guaranteed
+              // no-op rebuild behind it. Reschedule only when nothing else will.
+              if (!superseded) refreshRules();
               return;
             }
             try {

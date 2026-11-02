@@ -50,8 +50,15 @@ function showToast(msg, type = "") {
 
 // ── Formatting ────────────────────────────────────────────────────────────────
 
-function fmtBytes(n) {
-  n = Number(n) || 0;
+function finiteStat(value) {
+  if (typeof value !== "number" && typeof value !== "string") return 0;
+  if (typeof value === "string" && value.trim() === "") return 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function fmtBytes(value) {
+  const n = finiteStat(value);
   const sign = n < 0 ? "-" : "";
   const abs = Math.abs(n);
   if (abs >= 1 << 30) return sign + (abs / (1 << 30)).toFixed(2) + " GB";
@@ -61,19 +68,28 @@ function fmtBytes(n) {
 }
 
 function storedNumber(value) {
+  // Match content.js and prehook.js: booleans, null, and other unexpected
+  // storage types are corrupt values, not numeric settings.
+  if (typeof value !== "number" && typeof value !== "string") return NaN;
   if (typeof value === "string" && value.trim() === "") return NaN;
   const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : NaN;
+  return Number.isFinite(n) ? n : NaN;
 }
 
 function normalizeQuality(value) {
   const n = storedNumber(value);
-  return Number.isFinite(n) ? Math.max(1, Math.min(100, n)) : DEFAULTS.quality;
+  return Number.isFinite(n)
+    ? Math.max(1, Math.min(100, Math.trunc(n)))
+    : DEFAULTS.quality;
 }
 
 function normalizeWidth(value) {
   const n = storedNumber(value);
-  return Number.isSafeInteger(n) && n >= 0 ? n : DEFAULTS.maxWidth;
+  // Check the untruncated value first: Math.trunc(-0.5) is -0, which
+  // compares >= 0 and would otherwise make a negative width look valid.
+  return Number.isFinite(n) && n >= 0 && Number.isSafeInteger(Math.trunc(n))
+    ? Math.trunc(n)
+    : DEFAULTS.maxWidth;
 }
 
 function applySettings(d) {
@@ -88,7 +104,7 @@ function applySettings(d) {
 }
 
 function renderStats(stats = {}) {
-  const files = Number(stats.filesProcessed) || 0;
+  const files = Math.max(0, Math.trunc(finiteStat(stats.filesProcessed)));
   statImagesEl.textContent = files.toLocaleString();
   statBytesEl.textContent  = fmtBytes(stats.bytesProcessed);
   statSavedEl.textContent  = fmtBytes(stats.bytesSaved);
@@ -111,7 +127,7 @@ async function reloadCurrentPage() {
     const page = tabs
       .filter(tab => tab.id != null && isHttpUrl(tab.url))
       .sort((a, b) => Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0))[0];
-    if (page?.id) await chrome.tabs.reload(page.id);
+    if (page?.id != null) await chrome.tabs.reload(page.id);
   } catch {}
 }
 
@@ -142,37 +158,40 @@ function setWidthUI(w) {
 
 // Read the currently selected quality value (preset or custom).
 function readQuality() {
-  const custom = parseInt(customQualityEl.value, 10);
-  if (!isNaN(custom) && custom >= 1 && custom <= 100) return custom;
+  const custom = storedNumber(customQualityEl.value);
+  if (Number.isSafeInteger(custom) && custom >= 1 && custom <= 100) return custom;
   const active = qualityPresets.find(b => b.classList.contains("active"));
   return active ? Number(active.dataset.q) : DEFAULTS.quality;
 }
 
 // Read the currently selected width value (preset or custom).
 function readWidth() {
-  const custom = parseInt(customWidthEl.value, 10);
-  if (!isNaN(custom) && custom >= 0) return custom;
+  const custom = storedNumber(customWidthEl.value);
+  if (Number.isSafeInteger(custom) && custom >= 0) return custom;
   const active = widthPresets.find(b => b.classList.contains("active"));
   return active ? Number(active.dataset.w) : DEFAULTS.maxWidth;
 }
 
 // ── Load ──────────────────────────────────────────────────────────────────────
 
+function callStorage(read) {
+  try { return Promise.resolve(read()); }
+  catch (error) { return Promise.reject(error); }
+}
+
 async function load() {
-  let d, s;
-  try {
-    [d, s] = await Promise.all([
-      chrome.storage.sync.get(DEFAULTS),
-      chrome.storage.local.get({ stats: EMPTY_STATS })
-    ]);
-  } catch {
-    // A rejected storage read must not leave the settings page stuck on
-    // placeholders — fall back to the shared defaults and empty statistics
-    // (same hardening as the popup's load()).
-    d = { ...DEFAULTS };
-    s = { stats: EMPTY_STATS };
-  }
+  const [settingsResult, statsResult] = await Promise.allSettled([
+    callStorage(() => chrome.storage.sync.get(DEFAULTS)),
+    callStorage(() => chrome.storage.local.get({ stats: EMPTY_STATS }))
+  ]);
+  // Settings and statistics live in different storage areas. A failure in one
+  // must not replace a successful read from the other with fallback values.
+  const d = settingsResult.status === "fulfilled" ? settingsResult.value : DEFAULTS;
+  const s = statsResult.status === "fulfilled" ? statsResult.value : { stats: EMPTY_STATS };
   applySettings({ ...DEFAULTS, ...(d || {}), ...initialSyncOverrides });
+  // Only read during this first overlay; clear so stale entries do not
+  // linger for the life of the settings tab.
+  for (const k of Object.keys(initialSyncOverrides)) delete initialSyncOverrides[k];
   if (!initialStatsChanged) renderStats(s?.stats || EMPTY_STATS);
   initialLoadPending = false;
 }
@@ -220,8 +239,8 @@ qualityPresets.forEach(btn => {
 
 // Custom quality input — deselects all presets when user types a value.
 customQualityEl.addEventListener("input", () => {
-  const v = parseInt(customQualityEl.value, 10);
-  if (!isNaN(v) && v >= 1 && v <= 100) {
+  const v = storedNumber(customQualityEl.value);
+  if (Number.isSafeInteger(v) && v >= 1 && v <= 100) {
     qualityPresets.forEach(b => b.classList.remove("active"));
   } else if (customQualityEl.value === "") {
     // Restore the saved value's highlight when field is cleared
@@ -236,8 +255,8 @@ widthPresets.forEach(btn => {
 });
 
 customWidthEl.addEventListener("input", () => {
-  const v = parseInt(customWidthEl.value, 10);
-  if (!isNaN(v) && v >= 0) {
+  const v = storedNumber(customWidthEl.value);
+  if (Number.isSafeInteger(v) && v >= 0) {
     widthPresets.forEach(b => b.classList.remove("active"));
   } else if (customWidthEl.value === "") {
     setWidthUI(savedWidth);
@@ -295,7 +314,7 @@ async function save() {
   // Reject invalid custom values instead of silently falling back to a preset.
   const cq = customQualityEl.value.trim();
   const cw = customWidthEl.value.trim();
-  if (cq !== "" && !(/^\d+$/.test(cq) && +cq >= 1 && +cq <= 100)) {
+  if (cq !== "" && (!/^\d+$/.test(cq) || +cq < 1 || +cq > 100)) {
     showToast("Quality must be 1–100", "err");
     return;
   }
@@ -306,9 +325,9 @@ async function save() {
   const quality = readQuality();
   const maxWidth = readWidth();
   const excludeDomains = (excludeEl.value || "").trim();
-  let current;
+  let current = null;
+  try { current = await chrome.storage.sync.get(DEFAULTS); } catch {}
   try {
-    current = await chrome.storage.sync.get(DEFAULTS);
     await chrome.storage.sync.set({
       quality,
       maxWidth,
@@ -319,11 +338,11 @@ async function save() {
     return;
   }
 
-  // Reload whenever a URL-shaping setting changed (quality, max width, or the
-  // exclusion list) — exclusion changes only take effect on a fresh page load.
-  const previousQuality = normalizeQuality(current.quality ?? DEFAULTS.quality);
-  const previousMaxWidth = normalizeWidth(current.maxWidth ?? DEFAULTS.maxWidth);
-  if (quality !== previousQuality ||
+  // Reload whenever a URL-shaping setting changed. If the prior state could not
+  // be read, reload conservatively rather than risk leaving the page stale.
+  const previousQuality = normalizeQuality(current?.quality ?? DEFAULTS.quality);
+  const previousMaxWidth = normalizeWidth(current?.maxWidth ?? DEFAULTS.maxWidth);
+  if (!current || quality !== previousQuality ||
       maxWidth !== previousMaxWidth ||
       normalizeDomainsKey(excludeDomains) !== normalizeDomainsKey(current.excludeDomains)) {
     await reloadCurrentPage();
@@ -340,15 +359,15 @@ async function save() {
 // ── Reset ─────────────────────────────────────────────────────────────────────
 
 async function resetAll() {
-  let current;
+  let current = null;
+  try { current = await chrome.storage.sync.get(DEFAULTS); } catch {}
   try {
-    current = await chrome.storage.sync.get(DEFAULTS);
     await chrome.storage.sync.set(DEFAULTS);
   } catch {
     showToast("Couldn't reset settings", "err");
     return;
   }
-  const affectsCurrentPage =
+  const affectsCurrentPage = !current ||
     !!current.enabled !== DEFAULTS.enabled ||
     normalizeQuality(current.quality ?? DEFAULTS.quality) !== DEFAULTS.quality ||
     normalizeWidth(current.maxWidth ?? DEFAULTS.maxWidth) !== DEFAULTS.maxWidth ||

@@ -79,6 +79,9 @@ async function load() {
   // A storage.onChanged event can beat this asynchronous read. Overlay those
   // newer values so the older snapshot cannot roll the UI back.
   state = { ...DEFAULTS, ...(stored || {}), ...initialSyncOverrides };
+  // The overlay map is only read by this first load; drop it so the stale
+  // entries cannot linger for the life of the popup.
+  for (const k of Object.keys(initialSyncOverrides)) delete initialSyncOverrides[k];
   initialLoadPending = false;
   applyUI(state);
   detectSite().then(() => renderSiteUI(state));
@@ -125,9 +128,13 @@ presetBtns.forEach(btn => {
     try {
       await chrome.storage.sync.set({ quality });
     } catch {
+      // Revert to the last quality that actually reached storage. Keep state
+      // current on success too, so this revert reflects the latest applied
+      // preset even when the storage.onChanged echo has not arrived yet.
       setActivePreset(state.quality ?? DEFAULTS.quality);
       return;
     }
+    state.quality = quality;
     await reloadActiveTab();
     window.close();
   });

@@ -40,10 +40,15 @@
   const ORIGINAL_PRELOAD_HREF_ATTR = "data-bw-original-preload-href";
   const APPLIED_PRELOAD_HREF_ATTR = "data-bw-applied-preload-href";
   const PENDING_PRELOAD_HREF_ATTR = "data-bh-preload-href";
+  // Written only by content.js (which owns data-srcset fallback state), but
+  // cleared here too: when a restored element is reused for a new source,
+  // restoredAssignment() wipes every restore marker and this one must not
+  // survive to mislead a later restore.
+  const ORIGINAL_DATA_SRCSET_ATTR = "data-bw-original-data-srcset";
   const RESTORED_STATE_ATTRS = [
     "data-bw-restored", RESTORED_SRC_ATTR, RESTORED_SRCSET_ATTR,
     FAILED_PROXY_SRC_ATTR, FAILED_PROXY_SRCSET_ATTR,
-    ORIGINAL_SRC_ATTR, ORIGINAL_SRCSET_ATTR
+    ORIGINAL_SRC_ATTR, ORIGINAL_SRCSET_ATTR, ORIGINAL_DATA_SRCSET_ATTR
   ];
 
   const safeURL = (u, base = document.baseURI) => {
@@ -82,7 +87,9 @@
       Number.isFinite(rawQuality) ? Math.trunc(rawQuality) : DEFAULTS.quality));
     const rawMaxWidth = numericValue(opts.maxWidth ?? DEFAULTS.maxWidth);
     const truncatedMaxWidth = Math.trunc(rawMaxWidth);
-    const maxWidth = Number.isSafeInteger(truncatedMaxWidth) && truncatedMaxWidth >= 0
+    // Validate the raw value before truncation: Math.trunc(-0.5) is -0,
+    // which compares >= 0 and would otherwise disable the width cap.
+    const maxWidth = rawMaxWidth >= 0 && Number.isSafeInteger(truncatedMaxWidth)
       ? truncatedMaxWidth
       : DEFAULTS.maxWidth;
     // Store the normalized values back on the merged snapshot. That keeps
@@ -226,9 +233,12 @@
   function stop() {
     if (destroyed) return;
     destroyed = true;
-    try { preloadObserver && preloadObserver.disconnect(); } catch {}
-    try { pending.clear(); } catch {}
-    try { proxyUrlCache.clear(); } catch {}
+    // preloadObserver is always assigned before this runs (stop() is only
+    // reachable from the pagehide listener registered at the end of the IIFE),
+    // and disconnect()/Map.clear()/Set.clear() cannot throw per spec.
+    preloadObserver.disconnect();
+    pending.clear();
+    proxyUrlCache.clear();
     srcsetCache = new WeakMap();
   }
 
@@ -252,20 +262,32 @@
             }
           }
         }
+        // A queued <source> may have been moved out of <picture> while the
+        // settings read was pending. Re-check eligibility once at flush time
+        // (before either pending attribute is processed) so a now-media
+        // source is never sent through the image proxy.
+        const isPictureSource = !(el instanceof HTMLSourceElement) ||
+          el.parentElement?.tagName === "PICTURE";
         const pendingSrc = el.dataset.bhPendingSrc;
         if (pendingSrc !== undefined) {
           el.removeAttribute("data-bh-pending-src");
-          // applyOpts() ran before this flush (ready === true), so decideUrl()
-          // cannot return null here — the old `?? pendingSrc` was unreachable.
-          const decided = decideUrl(pendingSrc, el);
-          if (decided !== pendingSrc) rememberResolvedOriginal(el, pendingSrc);
-          if (el instanceof HTMLImageElement) nativeSetSrc(el, decided);
-          else setAttr.call(el, "src", decided); // <source> pending src
+          if (!isPictureSource) {
+            setAttr.call(el, "src", pendingSrc);
+          } else {
+            // applyOpts() ran before this flush (ready === true), so decideUrl()
+            // cannot return null here.
+            const decided = decideUrl(pendingSrc, el);
+            if (decided !== pendingSrc) rememberResolvedOriginal(el, pendingSrc);
+            if (el instanceof HTMLImageElement) nativeSetSrc(el, decided);
+            else setAttr.call(el, "src", decided); // <picture><source> pending src
+          }
         }
         const pendingSrcset = el.dataset.bhPendingSrcset;
         if (pendingSrcset !== undefined) {
           el.removeAttribute("data-bh-pending-srcset");
-          const rewritten = rewriteSrcset(pendingSrcset, el);
+          // A queued picture source may also have moved into a media element
+          // before settings arrived. Keep its srcset untouched just like src.
+          const rewritten = isPictureSource ? rewriteSrcset(pendingSrcset, el) : pendingSrcset;
           if (el instanceof HTMLImageElement) {
             nativeSetSrcset(el, rewritten);
           } else if (sourceProto && el instanceof HTMLSourceElement) {
@@ -298,6 +320,7 @@
   const srcDesc = Object.getOwnPropertyDescriptor(imgProto, "src");
   const srcsetDesc = Object.getOwnPropertyDescriptor(imgProto, "srcset");
   const setAttr = Element.prototype.setAttribute;
+  const removeAttr = Element.prototype.removeAttribute;
   const sourceProto = HTMLSourceElement?.prototype;
   const sourceSrcDesc = sourceProto ? Object.getOwnPropertyDescriptor(sourceProto, "src") : null;
   const sourceSrcsetDesc = sourceProto ? Object.getOwnPropertyDescriptor(sourceProto, "srcset") : null;
@@ -309,6 +332,25 @@
   function nativeSetSrcset(el, v) { srcsetDesc?.set?.call(el, v); }
   function nativeSourceSetSrc(el, v) { sourceSrcDesc?.set?.call(el, v); }
   function nativeSourceSetSrcset(el, v) { sourceSrcsetDesc?.set?.call(el, v); }
+
+  // A page can replace or remove an attribute after an earlier assignment was
+  // parked. Clear only that attribute's pending value; retain the element in
+  // the queue while any other pending image/loading operation remains.
+  const PENDING_IMAGE_ATTRS = [
+    'data-bh-pending-src', 'data-bh-pending-srcset', 'data-bh-pending-loading'
+  ];
+  function clearPending(el, kind) {
+    const attr = `data-bh-pending-${kind}`;
+    // Most assignments arrive after settings are ready and have no queued
+    // state. Keep that hot path to one attribute check instead of scanning all
+    // pending markers for every image/srcset/loading write.
+    if (!el.hasAttribute(attr) && !pending.has(el)) return;
+    if (el.hasAttribute(attr)) removeAttr.call(el, attr);
+    if (!PENDING_IMAGE_ATTRS.some(name => el.hasAttribute(name)) &&
+        !el.hasAttribute(PENDING_PRELOAD_HREF_ATTR)) {
+      pending.delete(el);
+    }
+  }
 
   // Spec-style srcset parser: a comma inside a URL (e.g. Cloudinary "w_400,h_300")
   // is part of the URL; only trailing commas or a comma after descriptors end a candidate.
@@ -434,7 +476,9 @@
     const current = el.getAttribute("href") || "";
     const decided = decideUrl(original, null);
     if (decided === null) {
-      el.setAttribute(PENDING_PRELOAD_HREF_ATTR, original);
+      // Write through the captured native setter: the patched setAttribute
+      // would only run its intercept-name gate and bail for this attribute.
+      setAttr.call(el, PENDING_PRELOAD_HREF_ATTR, original);
       el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
       el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
       pending.add(el);
@@ -455,10 +499,10 @@
   }
 
   function willBeImagePreloadLink(el, name, value) {
-    const rel = name === "rel" ? String(value ?? "") : (el.getAttribute("rel") || "");
-    const as = name === "as" ? String(value ?? "").toLowerCase() :
+    const rel = name === "rel" ? String(value) : (el.getAttribute("rel") || "");
+    const as = name === "as" ? String(value).toLowerCase() :
       String(el.getAttribute("as") || "").toLowerCase();
-    const type = name === "type" ? String(value ?? "") : String(el.getAttribute("type") || "");
+    const type = name === "type" ? String(value) : String(el.getAttribute("type") || "");
     return /(?:^|\s)preload(?:\s|$)/i.test(rel) &&
       (as === "image" || (!as && /^image\//i.test(type)));
   }
@@ -474,9 +518,18 @@
         restorePreloadHref(el);
         return;
       }
+      const current = el.getAttribute("href");
+      if (current === null) {
+        // The page explicitly removed href. A stale parked/saved value must
+        // not turn that removal into a later preload request.
+        removeAttr.call(el, ORIGINAL_PRELOAD_HREF_ATTR);
+        removeAttr.call(el, APPLIED_PRELOAD_HREF_ATTR);
+        removeAttr.call(el, PENDING_PRELOAD_HREF_ATTR);
+        pending.delete(el);
+        return;
+      }
       const stashed = el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
       const savedOriginal = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
-      const current = el.getAttribute("href");
       // decideUrl must see the ORIGINAL url, never "about:blank".
       const original = stashed || savedOriginal || current;
       if (!original || original === "about:blank") return;
@@ -504,10 +557,12 @@
           pending.add(this);
           nativeSetSrc(this, "about:blank");
         } else {
+          clearPending(this, "src");
           if (decided !== s) rememberResolvedOriginal(this, s);
           nativeSetSrc(this, decided);
         }
       } catch {
+        clearPending(this, "src");
         if (ready && opts?.enabled && isHttp(s)) {
           nativeSetSrc(this, "about:blank");
         } else {
@@ -525,7 +580,7 @@
       get: srcsetDesc.get,
       set(value) {
         let v = "";
-        try { v = String(value ?? ""); } catch {}
+        try { v = String(value); } catch {}
         const restored = restoredAssignment(this, "srcset", v);
         if (restored === "ignore") return;
         if (restored === "keep") { nativeSetSrcset(this, v); return; }
@@ -534,13 +589,13 @@
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
             nativeSetSrcset(this, "");
-          } else if (!opts.enabled) {
-            nativeSetSrcset(this, v);
           } else {
-            const rewritten = rewriteSrcset(v, this);
-            nativeSetSrcset(this, rewritten);
+            clearPending(this, "srcset");
+            if (!opts.enabled) nativeSetSrcset(this, v);
+            else nativeSetSrcset(this, rewriteSrcset(v, this));
           }
         } catch {
+          clearPending(this, "srcset");
           if (ready && opts?.enabled) nativeSetSrcset(this, "");
           else nativeSetSrcset(this, v);
         }
@@ -556,13 +611,14 @@
       get: sourceSrcsetDesc.get,
       set(value) {
         let v = "";
-        try { v = String(value ?? ""); } catch {}
+        try { v = String(value); } catch {}
         const restored = restoredAssignment(this, "srcset", v);
         if (restored === "ignore") return;
         if (restored === "keep") { nativeSourceSetSrcset(this, v); return; }
         // Media <source> elements are not image candidates; keep them untouched
         // even while settings are still loading.
         if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+          clearPending(this, "srcset");
           nativeSourceSetSrcset(this, v);
           return;
         }
@@ -571,13 +627,13 @@
             this.dataset.bhPendingSrcset = v;
             pending.add(this);
             nativeSourceSetSrcset(this, "");
-          } else if (!opts.enabled) {
-            nativeSourceSetSrcset(this, v);
           } else {
-            const rewritten = rewriteSrcset(v, this);
-            nativeSourceSetSrcset(this, rewritten);
+            clearPending(this, "srcset");
+            if (!opts.enabled) nativeSourceSetSrcset(this, v);
+            else nativeSourceSetSrcset(this, rewriteSrcset(v, this));
           }
         } catch {
+          clearPending(this, "srcset");
           if (ready && opts?.enabled) nativeSourceSetSrcset(this, "");
           else nativeSourceSetSrcset(this, v);
         }
@@ -601,6 +657,7 @@
         if (restored === "keep") { nativeSourceSetSrc(this, s); return; }
         try {
           if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+            clearPending(this, "src");
             nativeSourceSetSrc(this, s);
             return;
           }
@@ -611,9 +668,11 @@
             nativeSourceSetSrc(this, "about:blank");
             return;
           }
+          clearPending(this, "src");
           if (decided !== s) rememberResolvedOriginal(this, s);
           nativeSourceSetSrc(this, decided);
         } catch {
+          clearPending(this, "src");
           if (ready && opts?.enabled && isHttp(s)) nativeSourceSetSrc(this, "about:blank");
           else nativeSourceSetSrc(this, s);
         }
@@ -638,12 +697,13 @@
             this.dataset.bhPendingLoading = v;
             pending.add(this);
             loadingDesc.set.call(this, "lazy");
-          } else if (!opts.enabled || pageExcluded) {
-            loadingDesc.set.call(this, v);
           } else {
-            loadingDesc.set.call(this, v === "eager" ? "eager" : "lazy");
+            clearPending(this, "loading");
+            if (!opts.enabled || pageExcluded) loadingDesc.set.call(this, v);
+            else loadingDesc.set.call(this, v === "eager" ? "eager" : "lazy");
           }
         } catch {
+          clearPending(this, "loading");
           loadingDesc.set.call(this, v);
         }
       }
@@ -697,6 +757,7 @@
           pending.add(this);
           return setAttr.call(this, "loading", "lazy");
         }
+        clearPending(this, "loading");
         if (!opts.enabled || pageExcluded) return setAttr.call(this, "loading", v);
         return setAttr.call(this, "loading", v === "eager" ? "eager" : "lazy");
       }
@@ -706,7 +767,7 @@
         if (n === "href" && isImagePreloadLink(this)) {
           // Decide before the raw href reaches the browser; setting it first can
           // start an unoptimized preload before processPreloadLink cancels it.
-          applyPreloadHref(this, String(value ?? ""));
+          applyPreloadHref(this, String(value));
           return;
         }
 
@@ -727,7 +788,7 @@
       // (loading and link attributes were fully handled above).
       if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
       if (this instanceof HTMLImageElement) {
-        const incoming = String(value ?? "");
+        const incoming = String(value);
         const restored = restoredAssignment(this, n, incoming);
         if (restored === "ignore") return;
         if (restored === "keep") return setAttr.call(this, name, value);
@@ -739,6 +800,7 @@
             pending.add(this);
             return setAttr.call(this, "src", "about:blank");
           }
+          clearPending(this, "src");
           if (decided !== original) rememberResolvedOriginal(this, original);
           return setAttr.call(this, "src", decided);
         } else if (n === "srcset") {
@@ -747,6 +809,7 @@
             pending.add(this);
             return setAttr.call(this, "srcset", "");
           }
+          clearPending(this, "srcset");
           if (!opts.enabled) return setAttr.call(this, "srcset", incoming);
           return setAttr.call(this, "srcset", rewriteSrcset(incoming, this));
         }
@@ -755,10 +818,11 @@
         // Non-picture <source> elements are media sources. Pass them through
         // before the settings gate so their values are never parked/blanked.
         if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+          clearPending(this, n);
           return setAttr.call(this, name, value);
         }
 
-        const incoming = String(value ?? "");
+        const incoming = String(value);
         const restored = restoredAssignment(this, n, incoming);
         if (restored === "ignore") return;
         if (restored === "keep") return setAttr.call(this, name, value);
@@ -771,6 +835,7 @@
             pending.add(this);
             return setAttr.call(this, "src", "about:blank");
           }
+          clearPending(this, "src");
           if (decided !== original) rememberResolvedOriginal(this, original);
           return setAttr.call(this, "src", decided);
         }
@@ -780,10 +845,11 @@
           pending.add(this);
           return setAttr.call(this, "srcset", "");
         }
+        clearPending(this, "srcset");
         if (!opts.enabled) return setAttr.call(this, "srcset", incoming);
         return setAttr.call(this, "srcset", rewriteSrcset(incoming, this));
       }
-    } catch {
+    } catch (error) {
       // If an eligible image rewrite unexpectedly fails, do not fall through to
       // the original HTTP(S) value while protection is active.
       const protectedPictureSource =
@@ -792,8 +858,14 @@
         (n === "src" || n === "srcset");
       if (ready && opts?.enabled &&
           (this instanceof HTMLImageElement || protectedPictureSource)) {
-        return setAttr.call(this, n, n === "src" ? "about:blank" : "");
+        if (n === "src" || n === "srcset") clearPending(this, n);
+        // Only src/srcset carry source URLs. Other intercepted names (loading,
+        // link href/rel/as/type) must not be blanked; rethrow below so the page
+        // observes the same failure the native setter would produce.
+        if (n === "src") return setAttr.call(this, "src", "about:blank");
+        if (n === "srcset") return setAttr.call(this, "srcset", "");
       }
+      throw error;
     }
     return setAttr.call(this, name, value);
   };
@@ -809,7 +881,7 @@
           if (n.nodeType !== 1) return;
           if (n instanceof HTMLLinkElement) processPreloadLink(n);
           if (n.querySelectorAll) {
-            n.querySelectorAll('link[rel~="preload"]').forEach(processPreloadLink);
+            n.querySelectorAll('link[rel~="preload" i]').forEach(processPreloadLink);
           }
         });
       } else if (m.target instanceof HTMLLinkElement) {

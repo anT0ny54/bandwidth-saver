@@ -2,186 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
-## v0.2.0
+## v0.2.1
 
-- Second-pass full-project audit fixes: popup and settings-page initialization
-  now preserve newer `storage.onChanged` values that arrive before the initial
-  storage read completes, preventing stale snapshots from rolling controls
-  back. The settings page now normalizes stored quality and max-width values
-  exactly like the interception layers (including blank, out-of-range, and
-  unsafe values), and reset applies the known defaults directly instead of
-  making an unnecessary second storage read.
-- Separated the saved original for `data-srcset` from the real `srcset`
-  fallback, so lazy responsive-image metadata cannot overwrite the original
-  responsive candidates. A failed image restores both attributes when needed.
-- Left fragment-only inline CSS URLs (for example `url(#gradient)`) untouched;
-  resolving them against the page URL could otherwise send the document itself
-  to the image proxy. Empty domain entries are now discarded consistently in
-  both DOM-processing worlds after normalization.
-- Hardened the build parity check so braces in quoted strings, template
-  literals, and comments do not truncate the shared-function comparison.
-
-- Fixed stale asynchronous settings and DNR refresh races: callbacks from an
-  earlier storage read can no longer overwrite newer settings/rules after a
-  watchdog releases the operation. Icon reads and the local settings mirror
-  use the same generation guard; late mirror writes and DNR updates trigger a
-  fresh read/update so stale work cannot win last. Failed sync reads now keep
-  the existing local mirror and toolbar icon instead of overwriting them with
-  defaults; a failed install-time read likewise no longer seeds defaults over
-  an existing store.
-- Fixed `content.js` retaining obsolete original-source metadata when a page
-  reuses an image element for a skipped or non-proxied URL; the error handler
-  now restores only when the failed current candidate is still a proxy URL.
-- Fixed picture-source lifecycle handling: media `<source>` nodes are excluded
-  from image scans and mutation queues, while a source moved into `<picture>`
-  is re-armed and processed. Generic elements carrying ambiguous `data-*`
-  attributes are no longer included in the candidate scan at all.
-- Fixed lazy-image extension filtering to inspect the resolved URL pathname
-  rather than query-string text, and allow `.php` image endpoints.
-- Hardened numeric settings handling: blank/non-numeric/non-finite quality
-  values fall back to the default and finite values clamp to `1..100`; invalid, negative,
-  non-finite, or unsafe max-widths fall back to `768`, while `maxWidth: 0`
-  remains the intentional no-width-limit value.
-- GitHub Actions now builds pull requests targeting `main`; the release job is
-  restricted to non-PR runs. README documents the updated filtering, fallback,
-  source lifecycle, settings normalization, and validation behavior.
-
-- Fixed an infinite self-trigger loop in `content.js`: `srcset`/`data-srcset`
-  were rewritten with an unconditional `setAttribute`, which queues a mutation
-  record even for an identical value. For a mixed list where one candidate is
-  skipped (e.g. `icon.svg 1x, photo.jpg 2x`, or a tiny-dimension candidate) the
-  mutation filter re-queued the element, so it re-wrote itself on every
-  macrotask. Both attributes are now written only when the value changes
-  (`setIfChanged`).
-- Fixed the toolbar icon turning “disabled” when the synced `enabled` key was
-  removed (e.g. storage cleared): `service-worker.js` now falls back to
-  `DEFAULTS.enabled`, as every other reader already does.
-- Fixed a double-count in the statistics flush: if the watchdog released a
-  stalled flush and its read callback arrived late, the batch was written and
-  also returned for retry. A late callback is now ignored. Stored totals with a
-  missing/corrupt field are treated as 0 instead of turning the sum into `NaN`.
-- `parseDomains()` in `defaults.js` now drops entries that normalize to
-  nothing (e.g. a bare `https://`), so they no longer produce stray separators
-  in the saved exclusion list.
-- Optimized `content.js`: the `style` mutation caused by its own inline
-  background rewrite is recognised and skipped instead of being re-parsed.
-- Removed redundant code: the duplicate `settled` guard in `doRefreshRules`
-  and the `done` wrapper in `mirrorToLocal` (`finish` is now idempotent and
-  clears its own watchdog), the always-true `typeof sendResponse` check, the
-  duplicated empty-stats literals in `options.js` (one `EMPTY_STATS`), and the
-  unused `.btn:disabled` rule in `options.html`.
-- README: corrected the statistics description (savings can be negative) and
-  documented the behaviours above.
-- Optimized `content.js` lazy-attribute filtering: generic non-image elements matched only by `data-*` lazy selectors are retired after first inspection, and later mutation records for those elements are ignored. This avoids repeatedly resolving ambiguous `data-src`/`data-url` values that strict image-only mode intentionally never proxies.
-- Removed the redundant single-use `urlRe` alias in `content.js` inline
-  background rewriting; the shared `BG_URL_RE` constant is used directly.
-- Hoisted the clamped `devicePixelRatio` computation out of `buildProxyUrl`
-  into `applyOpts` in both `content.js` and `prehook.js`. The value only
-  changes on zoom or monitor moves, so it is now computed once per settings
-  application instead of on every uncached proxy-URL build.
-- Full codebase audit (content script, prehook, service worker, popup,
-  options, build script, workflows): no dead code, no cross-world conflicts,
-  and no bugs found. All cross-world duplicated helpers verified in sync
-  with the `build.sh` parity check.
-- Second full audit (all sources, HTML/CSS, build script, workflows, icons):
-  still no dead code, conflicts, or bugs. One micro-optimization applied:
-  `rewriteBg` in `content.js` now marks elements with no `background-image`
-  as done, so non-background `url(...)` styles (e.g. `cursor: url(...)`)
-  matched by the `[style*='url(' i]` selector are no longer re-parsed on
-  every mutation batch.
-- Third full audit, this time covering every remaining source end-to-end
-  (README, both HTML pages including all CSS, `_locales`, workflows, LICENSE,
-  icons): no dead code, no conflicts, and no bugs found. Verified the shared
-  `DEFAULTS` copies, the content/prehook parity helpers, all popup/options DOM
-  id lookups, and the toast-state CSS classes (`show`/`ok`/`warn`/`err`, which
-  are composed dynamically in `showToast`).
-- Removed the redundant hardcoded `QUALITY_PRESETS`/`WIDTH_PRESETS` arrays in
-  `options.js`; they are now derived from the preset buttons' `data-q`/`data-w`
-  attributes, so the markup is the single source of truth for preset values
-  and the two can no longer drift apart.
-- Fixed a statistics bug in `service-worker.js`: if reading the stored totals
-  failed (`lastError`, or a synchronous throw), the flush still wrote just the
-  new batch over them, wiping the accumulated statistics. The batch is now kept
-  and retried.
-- Fixed the popup layout: the compression-settings card touched the enable card
-  above it. All popup cards now share one `.card + .card` spacing rule.
-- Fixed the settings page “Reset stats” action reloading the whole form, which
-  discarded unsaved edits. Only the statistics display is refreshed now.
-- Removed duplicated domain-list parsing: `popup.js` and `options.js` now share
-  `parseDomains()` from `defaults.js`, and the `domainKey` helpers in
-  `content.js`/`prehook.js` reuse their existing domain-set parsers.
-- Removed a stale “proxy failures are left on the proxy URL” comment in
-  `prehook.js` that contradicted the browser-side restore fallback, and the
-  always-true `if (el)` guards in its `rewriteSrcset`.
-- Optimized `content.js`: mutation records that can never trigger a rewrite
-  (`src`/`srcset`/lazy attributes on non-image elements, link attributes on
-  non-`<link>` elements) are dropped before entering the bounded queue, and a
-  media `<source>` outside `<picture>` is retired after its first lazy check.
-- `build.sh`: removed a redundant staged-file existence check (already covered
-  by the copy loop) and added `sameOpts` to the content/prehook parity check, as
-  the README already described. `build.yml`: the release step reuses the
-  already-read manifest version.
-- Fourth full audit (every file read end-to-end, `build.sh` baseline verified
-  before and after the edits below).
-- Fixed the popup “Remove exclusion” action: when several entries covered the
-  current host (e.g. both `example.com` and `www.example.com`), only the first
-  was removed, so the site stayed excluded while the button claimed otherwise.
-  All covering entries are now removed.
-- Optimized `prehook.js`: the patched `Element.prototype.setAttribute` now
-  returns immediately for every attribute name other than the seven it
-  intercepts (`src`, `srcset`, `loading`, `href`, `rel`, `as`, `type`), before
-  any `instanceof` check. The preload `MutationObserver` also ignores attribute
-  records whose target is not a `<link>` (e.g. `<a href>`).
-- Optimized `content.js`: `rewriteImg` returns before touching non-`<img>`/
-  `<source>` elements (they are no longer added to `doneImg`), and `rewriteBg`
-  skips building a style declaration for elements with no `style` attribute.
-- Optimized `popup.js`: the active-tab lookup is no longer repeated when only
-  `enabled` changes (the site card does not depend on it).
-- Removed redundant code: the always-true `output !== bg` test in `rewriteBg`,
-  the `findExcludedDomain` helper (replaced by one shared `coversHost` test),
-  a redundant `|| 0` in `options.js` stats rendering, a double space in the
-  `#widthPresets` selector, and the unused `site` class in `popup.html`.
-- Fifth full audit (every file read end-to-end; `build.sh` baseline verified
-  before and after the edits below, plus a jsdom smoke test of `content.js`).
-- Fixed `content.js` ignoring a changed `srcset`/`data-srcset` whose FIRST
-  candidate is skipped (excluded host, `favicon`, …) even when a later candidate
-  was rewriteable: the mutation filter resolved the whole string as one URL, so
-  only the first candidate decided. It now checks every candidate
-  (`hasRewriteableUrl`); the element's own proxy writes still yield nothing
-  rewriteable, so no self-trigger loop is reintroduced.
-- Fixed `content.js` throwing on `d.bhOpts` when the `storage.local` read failed
-  (`lastError`, `d` undefined): the `sync` fallback never ran, leaving page
-  images unproxied until the 800 ms failsafe applied defaults instead of the
-  user's settings. The read failure now falls through to `storage.sync`.
-- Removed redundant code: `content.js`'s `nativeImgSrcSetter` (an isolated world
-  has its own DOM wrappers, so MAIN-world prehook patches never run for its
-  writes — its comment was wrong and `restoreOriginalImage` branched on it for
-  no reason); the no-op `.trim()` after splitting on whitespace in the four
-  domain parsers (`defaults.js`, `content.js`, `prehook.js`,
-  `service-worker.js`); the duplicate mirror pass in `onInstalled` (writing the
-  missing sync keys already fires `storage.onChanged`, which re-mirrors and
-  refreshes the rules); the redundant `className` reset in `popup.js`; and a
-  stale `proxyBase` comment in `defaults.js`.
-- README: documented the `storage.local` read-failure fallback and the
-  per-candidate `srcset` mutation check; the project tree now mentions the
-  keep-alive workflow.
-- Sixth full audit (every file read end-to-end; `build.sh` baseline verified
-  before and after the edits below).
-- Fixed `content.js` proxying non-URL lazy attributes: flag-style values such as
-  `data-lazy="true"` or `data-echo="1"` resolve as a relative URL
-  (`https://host/true`), so they were rewritten into a proxy URL and the flag
-  was corrupted. Lazy attributes (and their mutation filter) now require a
-  value containing a `/` or `.`.
-- Optimized `content.js`: added DOM roots nested inside another added root of
-  the same mutation batch are skipped. The parser reports every streamed node
-  as an added root of its parent, so each nested root used to re-run
-  `querySelectorAll` over its subtree once per ancestor.
-- Optimized `popup.js`: the active tab is resolved once (`detectSite`); later
-  exclusion-list changes only re-render the pill/button (`renderSiteUI`)
-  instead of repeating `tabs.query` and URL parsing.
-- Removed redundant code: the unreachable `if (!proxyConfig) return orig`
-  guard in `buildProxyUrl` (both `content.js` and `prehook.js`; callers only
-  run after settings are applied) and the two identical `<img>`/`<source>`
-  `src` branches in `content.js` `rewriteImg`.
-- README: documented the lazy-attribute URL check, nested-root skipping, and
-  the single popup tab lookup.
+- Eleventh full audit (every project file read end-to-end again: all JavaScript, both HTML pages with their CSS, both GitHub workflows, the build script, documentation, locale, manifest, and license).
+- `service-worker.js`: completed the stale-refresh fix. The stale `updateDynamicRules` callback now captures whether a newer refresh is in flight *before* calling `finish()` — `finish()` resets the shared `refreshing` guard, which made the old `if (!refreshing)` check dead logic: it was always true after `finish()`, so a guaranteed no-op full rules rebuild was queued behind the newer refresh (and the stale `finish()` could clear the newer refresh's guard mid-flight). The stale path still releases its own guard first and still reschedules when no newer refresh is running.
+- `prehook.js`: `applyPreloadHref()` writes the `data-bh-preload-href` bookkeeping attribute through the captured native `setAttribute` instead of the patched `Element.prototype.setAttribute`, avoiding a needless re-entry into the hook for a name it never intercepts (the function's other attribute writes already did this).
+- README: merged the two substantially duplicated "keeping the shared code in sync" sections (under "Execution-world architecture" and "Build") into a single canonical section; documented the completed stale-refresh reschedule fix.
+- Twelfth full audit (every project file read end-to-end again: all JavaScript, both HTML pages with their CSS, both workflows, the build script, documentation, locale, manifest, and license).
+- `prehook.js`: hoisted the duplicated `<picture>`-eligibility check in `flushPending()` — the identical `isPictureSource` expression was computed separately for the pending `src` and pending `srcset` blocks; it is now evaluated once per queued element before either attribute is processed (pure reads, no behavior change).
+- `popup.html`: the static status placeholder now reads "Checking status…" instead of "Disabled", matching the subtitle placeholder so the popup no longer shows a contradictory "Disabled / Checking status…" first paint before `popup.js` loads.
+- Thirteenth full audit (every project file read end-to-end again: all JavaScript, both HTML pages with their CSS, both workflows, the build script, documentation, locale, manifest, and license).
+- `service-worker.js`: the statistics flush no longer retries a failed batch every 750 ms without bound — a fork with a permanently broken `storage.local` would have retried (and warned) forever. A failed batch is now re-queued at most 3 consecutive times before being dropped with a single warning; the failure counter resets on the next successful flush and is not incremented while a statistics reset is pending (the reset flow discards the in-memory batch by design).
+- README: documented the bounded statistics-flush retry.
+- Verified: the six `build.sh` parity-checked shared blocks and the four `DEFAULTS` copies are identical, every popup/settings element ID is wired, and the documented statistics/restore/exclusion semantics match the implementation. No dead code, conflicts, or functional defects found.
+- Fourteenth full audit (every project file read end-to-end again: all JavaScript, both HTML pages with their CSS, both workflows, the build script, documentation, locale, manifest, and license).
+- `prehook.js`: removed the unreachable defensive `try/catch` wrappers in `stop()` — `MutationObserver.disconnect()`, `Map.prototype.clear()`, and `Set.prototype.clear()` cannot throw per spec, and `stop()` is only reachable from the `pagehide` listener registered after `preloadObserver` is assigned, so the `preloadObserver &&` null guard was dead as well. No behavior change; syntax and `build.sh` shared-code parity checks re-verified green.
+- Verified: all six JavaScript files pass `node --check` (module mode), `build.sh`'s parity check exits clean against the patched sources, every `popup.js`/`options.js` element ID exists in its markup, and the zip include list ships every manifest-referenced file. No dead code, bugs, conflicts, or optimization opportunities remain.
+- Fifteenth full audit (every project file read end-to-end again: all JavaScript, both HTML pages, both workflows, the build script, documentation, locale, manifest, and license).
+- `prehook.js`: `RESTORED_STATE_ATTRS` now also clears `data-bw-original-data-srcset` when a restored element is reused for a new source — the marker is written by `content.js` but survived `restoredAssignment()`'s state reset, so a stale lazy `data-srcset` fallback could have outlived the restore it belonged to.
+- `popup.js`: the quality preset handler keeps `state.quality` current after a successful save, so the failed-save revert no longer depends on the `storage.onChanged` echo arriving first.
+- Verified: shared-code parity blocks and all four `DEFAULTS` copies still match, `node --check` passes for every shipped script, and all popup/settings element IDs remain wired. No dead code, conflicts, or further defects found.
+- Sixteenth full audit (every project file read end-to-end again: all JavaScript, both HTML pages with their CSS, both workflows, the build script, documentation, locale, manifest, and license).
+- `content.js`: removed the dead defensive `try/catch` around `mo.disconnect()` in `stop()` — the same unreachable wrapper was already removed from prehook.js's `stop()` in the fourteenth audit, but the content.js copy was missed. `mo` is a const assigned before the only stop() caller (the pagehide listener) is registered, and `MutationObserver.disconnect()` cannot throw per spec. No behavior change.
+- Verified: every popup/settings element ID is wired in its markup, all README behavioral claims match the implementation, the build.sh parity-checked shared blocks and the four DEFAULTS copies are identical, and no dead code, conflicts, or functional defects remain.
+- Seventeenth full audit (every project file read end-to-end again: all JavaScript, both HTML pages with their CSS, both workflows, the build script, documentation, locale, manifest, and license).
+- `service-worker.js`: the settings-mirror watchdog now invalidates its generation, matching the DNR-refresh and statistics guards — previously a sync-read callback arriving after the mirror watchdog released the guard could pass the generation check and write a stale snapshot over a newer `bhOpts` local mirror on browsers that silently drop storage callbacks.
+- `prehook.js`: the `Element.prototype.setAttribute` patch's shared catch handler no longer blanks an intercepted `loading` attribute to `""` when the interception itself throws — only `src`/`srcset` are blanked under protection; other intercepted names (loading, link `href`/`rel`/`as`/`type`) rethrow so the page observes the same failure the native setter would produce.
+- Verified: all six scripts pass `node --check` (module mode), the build.sh shared-code parity blocks and four `DEFAULTS` copies are untouched and still identical, and every popup/settings element ID remains wired. No dead code, conflicts, or further defects found.
+- Eighteenth full audit (every project file read end-to-end again: all JavaScript, both HTML pages, the build script, README, changelog, locale, manifest, and both workflows).
+- `popup.js` / `options.js`: the `initialSyncOverrides` overlay map is now cleared once the initial settings load completes — it was only read during that first overlay, so post-load it was dead state that lived for the life of the page.
+- `service-worker.js`: the shared header `TextDecoder` is now a module-level const instead of a lazy-initialized `let` — `TextDecoder` is stateless for single-shot decodes, so the deferred construction bought nothing.
+- CHANGELOG: the Fifteenth and Sixteenth audit entries are now listed in chronological order.
+- Verified: all six scripts pass `node --check` (module mode), the build.sh parity-checked shared blocks and four `DEFAULTS` copies are untouched and still identical, and every popup/settings element ID remains wired. No dead code, conflicts, or functional defects remain.

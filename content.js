@@ -709,7 +709,11 @@
       const applied = el.getAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
       // The empty value is the MAIN-world parking placeholder. Otherwise only
       // replace the exact value that this extension wrote, preserving page edits.
-      if (current === "" || (applied && current === applied)) {
+      // An absent attribute is an explicit page removal, not our empty
+      // parking placeholder. Require the attribute to still exist before
+      // restoring so a simultaneous rel/type change cannot resurrect it.
+      if (el.hasAttribute("imagesrcset") &&
+          (current === "" || (applied && current === applied))) {
         el.setAttribute("imagesrcset", original);
       }
     }

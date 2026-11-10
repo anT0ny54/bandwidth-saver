@@ -2,7 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
-## v0.2.1
+## v0.2.2
+
+- `prehook.js`, `content.js`: fixed a preload lifecycle bug where removing `imagesrcset` and repurposing the link in the same task could restore the removed responsive URL. Both execution worlds now restore it only while the attribute still exists as the empty parking placeholder or contains the exact proxy value written by the extension.
+- `prehook.js`: pending `src`, `srcset`, and `loading` values are now checked against their browser-facing parking placeholders before settings flush, so a page-side removal cannot be undone by a late settings event.
+- `README.md`: documented the preload-removal guarantee and final-flush validation for parked image values.
+
+- `prehook.js`: proxy-construction failures now fail closed for eligible HTTP(S) `img.src` and `<picture><source>.src` assignments, including relative URLs resolved against `document.baseURI`. Excluded hosts, skipped assets, existing proxy URLs, restored elements, and non-HTTP(S) values are left intact.
+- `build.sh`: JavaScript syntax checks now follow the manifest's script/module split — service/content scripts are parsed in CommonJS mode to reject module-only syntax, while popup/options/defaults are parsed as ES modules.
+- `README.md`: documented the eligible-URL fail-closed behavior and runtime-aware build validation.
+- `prehook.js`: image-preload `href` and responsive `imagesrcset` now fail closed when proxy URL construction throws, including property, attribute, and `relList` activation paths; the original values remain parked for retry on the next settings event. An empty `imagesrcset` placeholder is now created when needed, preserving pending imagesrcset-only preload assignments until settings arrive.
+- `README.md`: documented fail-closed preload handling and the retained placeholder for imagesrcset-only hints.
+- `prehook.js`: queued image and picture-source rewrites now retain their original pending values when proxy construction fails during settings flush; retries run on the next settings event from a snapshot, avoiding an immediate retry loop.
+- `README.md`: documented retained pending image/source values and deferred retry behavior after a queued rewrite fails.
+- `prehook.js`: direct `img.src`, image/picture `srcset`, and picture-source `src` assignments now retain their originals and retry after a proxy-construction failure when the next settings event arrives, instead of leaving only a blank placeholder.
+- `README.md`: clarified that original values are retained for direct as well as settings-queued rewrite failures.
 
 - `prehook.js`: corrected Web IDL conversion for `HTMLImageElement.srcset`, `HTMLSourceElement.srcset`, and `HTMLLinkElement.imageSrcset`; all three are `USVString` properties and now normalize lone UTF-16 surrogates before proxy rewriting, matching native browser setters. `README.md` now distinguishes these property conversions from `setAttribute()`'s `DOMString` behavior.
 - `prehook.js`, `content.js`: responsive image preload candidate lists in `HTMLLinkElement.imageSrcset` / `imagesrcset` are now intercepted alongside `href`, including parser-created links, dynamic property/attribute assignments, and `imagesrcset`-only preload hints. Both execution worlds retain and restore the original candidate list when the link is repurposed; removing `imagesrcset` clears its saved/parked state.

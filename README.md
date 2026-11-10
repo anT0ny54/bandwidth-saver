@@ -17,10 +17,10 @@
 
 - **MAIN-world early interception** at `document_start`.
 - **JSON/DOM-event settings bridge** from isolated `content.js` to MAIN-world `prehook.js`.
-- **Temporary parking** of page-created images, `srcset`, image preloads (`href` and responsive `imagesrcset`), and loading assignments until settings arrive. A newer assignment replaces its queued value, while removing `src`, `srcset`, `loading`, an image-preload `href`, or `imagesrcset` cancels the corresponding pending restore.
+- **Temporary parking** of page-created images, `srcset`, image preloads (`href` and responsive `imagesrcset`), and loading assignments until settings arrive. A newer assignment replaces its queued value, while removing `src`, `srcset`, `loading`, an image-preload `href`, or `imagesrcset` cancels the corresponding pending restore; the final flush also checks that the parked placeholder is still present before restoring an image value.
 - **Normal images and `srcset`** including `<picture>` / `<source>` candidates.
 - **Lazy-loading attributes:** `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset` — rewritten **only** on `<img>` and `<picture><source>` elements, and only when the value looks like a URL or path (contains a `/` or `.`), so flag-style values such as `data-lazy="true"` are never turned into a proxied `https://host/true`. Generic elements are left untouched (their `data-*` payloads can be video, pages, or scripts), and media `<source>` elements inside `<video>`/`<audio>` pass through untouched, including while settings are still loading. Eligibility is re-checked when queued work is flushed, so a `<source>` moved out of `<picture>` before settings arrive is not proxied as media. A previously proxied source moved into `<video>`/`<audio>` restores only attributes that still contain a proxy URL. If a lazy loader copied a proxied `data-srcset` into `srcset`, that candidate's original is kept separately before a later `data-srcset` reassignment and can restore `srcset` even when there was no separate `srcset` fallback marker; a newer non-proxy `src` or `data-srcset` is preserved. Each rewritten lazy `data-*` URL is also restored only while it still contains the proxy URL. A source moved into a `<picture>` becomes eligible when inserted there.
-- **Image preloads:** `<link rel="preload" as="image">`, including `href` and responsive `imagesrcset` candidate lists, dynamically assigned through properties, attributes, or `relList` token operations (`add`, `remove`, `replace`, `toggle`, and `.value`). HTML preload token matching is ASCII case-insensitive, so forms such as `rel="PreLoad"` are also discovered. The MAIN-world hook rewrites or parks both URL sources before activating a preload when possible; an `imagesrcset`-only responsive hint is covered even without `href`. Both layers retain the original values and restore them if the link is repurposed, including values parked while settings were loading. The isolated layer never restores a parked preload before settings are known, so parking cannot be undone early by a mutation batch racing the storage read. Removing either preload attribute clears its saved/parked state.
+- **Image preloads:** `<link rel="preload" as="image">`, including `href` and responsive `imagesrcset` candidate lists, dynamically assigned through properties, attributes, or `relList` token operations (`add`, `remove`, `replace`, `toggle`, and `.value`). HTML preload token matching is ASCII case-insensitive, so forms such as `rel="PreLoad"` are also discovered. The MAIN-world hook rewrites or parks both URL sources before activating a preload when possible; an `imagesrcset`-only responsive hint is covered even without `href`, and its empty placeholder attribute is retained while the original candidates are parked (even when no `imagesrcset` attribute existed yet). If proxy URL construction fails for an otherwise eligible preload, its original `href` / `imagesrcset` is parked rather than passed through unoptimized; the pending value is retried when settings are next applied. Both layers retain the original values and restore them if the link is repurposed, including values parked while settings were loading. The isolated layer never restores a parked preload before settings are known, so parking cannot be undone early by a mutation batch racing the storage read. Removing either preload attribute clears its saved/parked state; if removal and link repurposing happen in the same task, the removed attribute is not resurrected.
 - **Inline CSS backgrounds:** best-effort rewriting of HTTP(S) `url(...)` values in inline `background-image`.
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
 - **Per-image proxy fallback:** failed proxy image loads restore only `src`, `srcset`, `data-srcset`, and lazy attributes that still contain a proxy URL; a saved `data-srcset` original can also restore `srcset` when a lazy loader copied the proxied candidate there, and is retained separately if `data-srcset` is later reassigned. Newer non-proxy attribute values are preserved. Immediate retries of the same failed proxy URL are ignored, while the element can be reused for a different image. Reassigned lazy-image URLs refresh their saved fallback, so a later proxy failure cannot restore a stale URL from the previous assignment.
@@ -142,6 +142,21 @@ When the MAIN-world layer changes an image to a proxy URL, it retains the origin
 
 This prevents a failed proxy request from becoming a permanent broken image while avoiding an immediate proxy loop.
 Reusing a restored element for a different source clears every saved fallback marker — including the separately tracked `data-srcset` original — in both execution worlds, so no marker can outlive the restore it belonged to.
+
+If proxy URL construction unexpectedly throws during an otherwise eligible
+`img.src`, `<picture><source>.src`, or image `srcset` assignment, the MAIN-world
+hook fails closed: `src` is parked at `about:blank` and `srcset` is made empty,
+so the original HTTP(S) URL cannot bypass compression. This also covers
+relative HTTP(S) URLs resolved against the document base URL. Image-preload
+`href` and responsive `imagesrcset` assignments follow the same rule: the
+original candidate is retained in pending state while the browser-facing
+attribute is parked, including when a preload is activated through `relList`.
+The original image, picture-source, or preload value remains in pending state
+and is retried when settings are next published; a failed queued rewrite does
+not drop its source or spin in an immediate retry loop. In every case, parking
+is limited to otherwise eligible URLs; excluded hosts, skipped assets,
+already-proxied URLs, restored elements, and non-HTTP(S) values remain
+untouched.
 
 On elements carrying multiple lazy attributes, the original preserved for
 restore is the first one remembered — normally the true `<img src>` — never a
@@ -296,7 +311,7 @@ bash build.sh
 The script:
 
 1. reads the version from `manifest.json`;
-2. validates JavaScript syntax;
+2. validates JavaScript syntax according to the manifest's script/module split (service worker and content scripts in CommonJS parsing mode to reject module-only syntax; popup/options/defaults as ES modules);
 3. verifies the duplicated proxy URL, tiny-dimension pattern, `srcset` parser, proxy URL builder, settings normalizer, and settings-comparison helper (`sameOpts`) in `content.js` and `prehook.js`, plus checks that all four `DEFAULTS` copies match;
 4. stages only files required by the manifest/package;
 5. verifies manifest references;

@@ -29,13 +29,18 @@ with open(sys.argv[1], encoding='utf-8') as f:
 PY
 )"
 
-# Fast preflight: validate every shipped JavaScript file before packaging.
-# This catches syntax regressions early and requires only the Node runtime.
-# popup/options/defaults use ES module syntax; --input-type=module forces
-# module parsing regardless of the .js extension, so no temp .mjs copies.
-for js in service-worker.js prehook.js content.js popup.js options.js defaults.js; do
+# Fast preflight: validate every shipped JavaScript file against the
+# manifest's script/module split. The service worker and both content scripts
+# must reject module-only syntax; popup/options/defaults are ES modules.
+for js in service-worker.js prehook.js content.js; do
+  node --check --input-type=commonjs < "$ROOT_DIR/$js" >/dev/null || {
+    echo "ERROR: classic JavaScript syntax check failed: $js" >&2
+    exit 1
+  }
+done
+for js in popup.js options.js defaults.js; do
   node --check --input-type=module < "$ROOT_DIR/$js" >/dev/null || {
-    echo "ERROR: JavaScript syntax check failed: $js" >&2
+    echo "ERROR: ES module JavaScript syntax check failed: $js" >&2
     exit 1
   }
 done

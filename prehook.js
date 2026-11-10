@@ -65,7 +65,6 @@
       .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
       .filter(Boolean)
   );
-  const isHttp = u => /^https?:\/\//i.test(u);
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
   const isTiny = u => TINY_DIM_RE.test(u);
   const SVG_URL_RE = /\.svg(?:[?#]|$)/i;
@@ -255,21 +254,53 @@
   // Flush image/source/link elements queued while settings were loading.
   function flushPending() {
     if (destroyed) return;
-    for (const el of pending) {
-      pending.delete(el);
+    // Iterate a snapshot: a failed rewrite may need to re-queue the same node.
+    // Adding it back to the Set during a live Set iteration would visit it
+    // again immediately and could loop forever while proxy construction fails.
+    const queued = Array.from(pending);
+    pending.clear();
+    const retry = [];
+    const hasPendingState = el => el.hasAttribute("data-bh-pending-src") ||
+      el.hasAttribute("data-bh-pending-srcset") ||
+      el.hasAttribute("data-bh-pending-loading") ||
+      el.hasAttribute(PENDING_PRELOAD_HREF_ATTR) ||
+      el.hasAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+    for (const el of queued) {
       try {
         // Image-preload links queued with a stashed href or imagesrcset value.
-        if (el instanceof HTMLLinkElement) { processPreloadLink(el); continue; }
+        if (el instanceof HTMLLinkElement) {
+          processPreloadLink(el);
+          if (hasPendingState(el)) retry.push(el);
+          continue;
+        }
+        // Native removeAttribute()/toggleAttribute(false) calls do not pass
+        // through the property/setAttribute hooks. If the page removed a
+        // parked attribute before this settings event, the placeholder is no
+        // longer present; discard its saved value instead of resurrecting it.
+        if (el instanceof HTMLImageElement || el instanceof HTMLSourceElement) {
+          if (el.hasAttribute("data-bh-pending-src") &&
+              el.getAttribute("src") !== "about:blank") {
+            removeAttr.call(el, "data-bh-pending-src");
+          }
+          if (el.hasAttribute("data-bh-pending-srcset") &&
+              (!el.hasAttribute("srcset") || el.getAttribute("srcset") !== "")) {
+            removeAttr.call(el, "data-bh-pending-srcset");
+          }
+          if (el instanceof HTMLImageElement &&
+              el.hasAttribute("data-bh-pending-loading") && !el.hasAttribute("loading")) {
+            removeAttr.call(el, "data-bh-pending-loading");
+          }
+        }
         // <img>.loading values set before settings were known.
         if (el instanceof HTMLImageElement && loadingDesc && loadingDesc.set) {
           const pendingLoading = el.dataset.bhPendingLoading;
           if (pendingLoading !== undefined) {
-            el.removeAttribute("data-bh-pending-loading");
             if (!opts.enabled || pageExcluded) {
               loadingDesc.set.call(el, pendingLoading);
             } else {
               loadingDesc.set.call(el, pendingLoading === "eager" ? "eager" : "lazy");
             }
+            el.removeAttribute("data-bh-pending-loading");
           }
         }
         // A queued <source> may have been moved out of <picture> while the
@@ -280,32 +311,44 @@
           el.parentElement?.tagName === "PICTURE";
         const pendingSrc = el.dataset.bhPendingSrc;
         if (pendingSrc !== undefined) {
-          el.removeAttribute("data-bh-pending-src");
           if (!isPictureSource) {
             setAttr.call(el, "src", pendingSrc);
           } else {
             // applyOpts() ran before this flush (ready === true), so decideUrl()
-            // cannot return null here.
+            // cannot return null here. Keep the parked original until the
+            // rewrite succeeds; a thrown proxy build must remain retryable.
             const decided = decideUrl(pendingSrc, el);
             if (decided !== pendingSrc) rememberResolvedOriginal(el, pendingSrc);
             if (el instanceof HTMLImageElement) nativeSetSrc(el, decided);
             else setAttr.call(el, "src", decided); // <picture><source> pending src
           }
+          el.removeAttribute("data-bh-pending-src");
         }
         const pendingSrcset = el.dataset.bhPendingSrcset;
         if (pendingSrcset !== undefined) {
-          el.removeAttribute("data-bh-pending-srcset");
           // A queued picture source may also have moved into a media element
           // before settings arrived. Keep its srcset untouched just like src.
+          // Retain the pending source until the native write completes so a
+          // proxy-build failure cannot strand an empty srcset without retry data.
           const rewritten = isPictureSource ? rewriteSrcset(pendingSrcset, el) : pendingSrcset;
           if (el instanceof HTMLImageElement) {
             nativeSetSrcset(el, rewritten);
           } else if (sourceProto && el instanceof HTMLSourceElement) {
             nativeSourceSetSrcset(el, rewritten);
           }
+          el.removeAttribute("data-bh-pending-srcset");
         }
-      } catch {}
+        // An operation that could not be completed (for example, a missing
+        // platform descriptor) stays queued. On exceptions, the catch below
+        // re-queues any still-present marker without exposing the original URL.
+        if (hasPendingState(el)) retry.push(el);
+      } catch {
+        if (hasPendingState(el)) retry.push(el);
+      }
     }
+    // Add retries after the snapshot has been processed, avoiding an infinite
+    // same-pass retry when a proxy constructor consistently throws.
+    for (const el of retry) pending.add(el);
   }
 
   // Settings arrive from content.js through a JSON-only DOM event.
@@ -318,7 +361,12 @@
       // Identical settings snapshots are common during mirror refreshes and
       // storage storms. Re-applying them would clear both URL caches and
       // rebuild derived state without changing behavior.
-      if (ready && sameOpts(next, opts)) return;
+      if (ready && sameOpts(next, opts)) {
+        // Do not rebuild caches for an equivalent snapshot, but still use a
+        // repeat settings event as a retry signal for previously parked URLs.
+        if (pending.size) flushPending();
+        return;
+      }
       applyOpts(next);
       flushPending();
     } catch {}
@@ -402,6 +450,20 @@
     if (urlObj.hostname === proxyHost || SVG_URL_RE.test(urlObj.href) ||
         ICON_URL_RE.test(urlObj.href) || isTiny(urlObj.href)) return true;
     return excludedHost(urlObj.hostname);
+  }
+
+  // Fail closed only when this value would otherwise be proxied. Resolve the
+  // candidate against document.baseURI so relative URLs receive the same
+  // protection as absolute HTTP(S) URLs if proxy construction throws.
+  function shouldFailClosed(original, el) {
+    if (!original || !String(original).trim() || !ready || !opts?.enabled ||
+        pageExcluded || (el && isRestored(el))) return false;
+    const urlObj = safeURL(original);
+    return !!urlObj && /^https?:$/.test(urlObj.protocol) && !skipAbsolute(urlObj);
+  }
+
+  function hasFailClosedSrcsetCandidate(srcset, el) {
+    return parseSrcset(srcset).some(({ url }) => shouldFailClosed(url, el));
   }
 
   function rewriteSrcset(ss, el, remember = true) {
@@ -500,7 +562,11 @@
       const applied = el.getAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
       // The empty value is our temporary parking placeholder. Otherwise restore
       // only the exact responsive candidate list that this hook rewrote.
-      if (current === "" || (applied && current === applied)) {
+      // An absent attribute is an explicit page removal, not our empty
+      // parking placeholder. Require the attribute to still exist before
+      // restoring so a simultaneous rel/type change cannot resurrect it.
+      if (el.hasAttribute("imagesrcset") &&
+          (current === "" || (applied && current === applied))) {
         setAttr.call(el, "imagesrcset", original);
       }
     }
@@ -527,11 +593,31 @@
       el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
       el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
       pending.add(el);
-      if (current !== "") setAttr.call(el, "imagesrcset", "");
+      if (!el.hasAttribute("imagesrcset") || current !== "") {
+        setAttr.call(el, "imagesrcset", "");
+      }
       return;
     }
 
-    const rewritten = rewriteSrcset(original, el, false);
+    let rewritten;
+    try {
+      rewritten = rewriteSrcset(original, el, false);
+    } catch (error) {
+      // The property/attribute setter and relList preflight callers must never
+      // fall through to the original candidate list when URL construction
+      // fails. Park the original exactly as the settings-not-ready path does,
+      // but only when at least one candidate is otherwise eligible for proxying.
+      const eligible = parseSrcset(original).some(({ url }) => shouldFailClosed(url, el));
+      if (!eligible) throw error;
+      setAttr.call(el, PENDING_PRELOAD_IMAGESRCSET_ATTR, original);
+      el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+      pending.add(el);
+      if (!el.hasAttribute("imagesrcset") || current !== "") {
+        setAttr.call(el, "imagesrcset", "");
+      }
+      return;
+    }
     el.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
     if (rewritten !== original) {
       setAttr.call(el, ORIGINAL_PRELOAD_IMAGESRCSET_ATTR, original);
@@ -546,7 +632,21 @@
 
   function applyPreloadHref(el, original) {
     const current = el.getAttribute("href") || "";
-    const decided = decideUrl(original, null);
+    let decided;
+    try {
+      decided = decideUrl(original, null);
+    } catch (error) {
+      // As with direct image assignments, an eligible preload must not be
+      // allowed to request the unoptimized source if proxy URL construction
+      // unexpectedly fails. Keep its original URL parked for a later retry.
+      if (!shouldFailClosed(original, null)) throw error;
+      setAttr.call(el, PENDING_PRELOAD_HREF_ATTR, original);
+      el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+      pending.add(el);
+      if (current !== "about:blank") setAttr.call(el, "href", "about:blank");
+      return;
+    }
     if (decided === null) {
       // Write through the captured native setter: the patched setAttribute
       // would only run its intercept-name gate and bail for this attribute.
@@ -651,10 +751,12 @@
           nativeSetSrc(this, decided);
         }
       } catch {
-        clearPending(this, "src");
-        if (ready && opts?.enabled && isHttp(s)) {
+        if (shouldFailClosed(s, this)) {
+          this.dataset.bhPendingSrc = s;
+          pending.add(this);
           nativeSetSrc(this, "about:blank");
         } else {
+          clearPending(this, "src");
           nativeSetSrc(this, s);
         }
       }
@@ -684,9 +786,14 @@
             else nativeSetSrcset(this, rewriteSrcset(v, this));
           }
         } catch {
-          clearPending(this, "srcset");
-          if (ready && opts?.enabled) nativeSetSrcset(this, "");
-          else nativeSetSrcset(this, v);
+          if (hasFailClosedSrcsetCandidate(v, this)) {
+            this.dataset.bhPendingSrcset = v;
+            pending.add(this);
+            nativeSetSrcset(this, "");
+          } else {
+            clearPending(this, "srcset");
+            nativeSetSrcset(this, v);
+          }
         }
       }
     });
@@ -722,9 +829,14 @@
             else nativeSourceSetSrcset(this, rewriteSrcset(v, this));
           }
         } catch {
-          clearPending(this, "srcset");
-          if (ready && opts?.enabled) nativeSourceSetSrcset(this, "");
-          else nativeSourceSetSrcset(this, v);
+          if (hasFailClosedSrcsetCandidate(v, this)) {
+            this.dataset.bhPendingSrcset = v;
+            pending.add(this);
+            nativeSourceSetSrcset(this, "");
+          } else {
+            clearPending(this, "srcset");
+            nativeSourceSetSrcset(this, v);
+          }
         }
       }
     });
@@ -760,9 +872,14 @@
           if (decided !== s) rememberResolvedOriginal(this, s);
           nativeSourceSetSrc(this, decided);
         } catch {
-          clearPending(this, "src");
-          if (ready && opts?.enabled && isHttp(s)) nativeSourceSetSrc(this, "about:blank");
-          else nativeSourceSetSrc(this, s);
+          if (shouldFailClosed(s, this)) {
+            this.dataset.bhPendingSrc = s;
+            pending.add(this);
+            nativeSourceSetSrc(this, "about:blank");
+          } else {
+            clearPending(this, "src");
+            nativeSourceSetSrc(this, s);
+          }
         }
       }
     });
@@ -1061,13 +1178,22 @@
         if (!opts.enabled) return setAttr.call(this, attrName, incoming);
         return setAttr.call(this, attrName, rewriteSrcset(incoming, this));
       } catch (error) {
-        // If an eligible image rewrite unexpectedly fails, do not fall through
-        // to the original HTTP(S) value while protection is active. Conversion
-        // errors have already happened above and still propagate natively.
+        // If an eligible image rewrite unexpectedly fails, keep its original
+        // value in pending state while the browser-facing attribute stays
+        // parked. A later settings update can safely retry the rewrite.
         if (ready && opts?.enabled) {
-          if (n === "src" || n === "srcset") clearPending(this, n);
-          if (n === "src") return setAttr.call(this, attrName, "about:blank");
-          return setAttr.call(this, attrName, "");
+          if (n === "src" && shouldFailClosed(incoming, this)) {
+            this.dataset.bhPendingSrc = incoming;
+            pending.add(this);
+            return setAttr.call(this, attrName, "about:blank");
+          }
+          if (n === "srcset" && hasFailClosedSrcsetCandidate(incoming, this)) {
+            this.dataset.bhPendingSrcset = incoming;
+            pending.add(this);
+            return setAttr.call(this, attrName, "");
+          }
+          clearPending(this, n);
+          return setAttr.call(this, attrName, incoming);
         }
         throw error;
       }
@@ -1112,9 +1238,18 @@
         const protectedPictureSource =
           this.parentElement?.tagName === "PICTURE" && (n === "src" || n === "srcset");
         if (ready && opts?.enabled && protectedPictureSource) {
+          if (n === "src" && shouldFailClosed(incoming, this)) {
+            this.dataset.bhPendingSrc = incoming;
+            pending.add(this);
+            return setAttr.call(this, attrName, "about:blank");
+          }
+          if (n === "srcset" && hasFailClosedSrcsetCandidate(incoming, this)) {
+            this.dataset.bhPendingSrcset = incoming;
+            pending.add(this);
+            return setAttr.call(this, attrName, "");
+          }
           clearPending(this, n);
-          if (n === "src") return setAttr.call(this, attrName, "about:blank");
-          return setAttr.call(this, attrName, "");
+          return setAttr.call(this, attrName, incoming);
         }
         throw error;
       }

@@ -1,4 +1,4 @@
-import { DEFAULTS, parseDomains } from "./defaults.js";
+import { DEFAULTS, parseDomains, reloadWebTab } from "./defaults.js";
 
 const $ = id => document.getElementById(id);
 
@@ -13,7 +13,7 @@ const statImagesEl   = $("statImages");
 const statBytesEl    = $("statBytes");
 const statSavedEl    = $("statSaved");
 const toastEl        = $("toast");
-const versionEl       = $("extensionVersion");
+const versionEl      = $("extensionVersion");
 const customQualityEl = $("customQuality");
 const customWidthEl   = $("customWidth");
 
@@ -34,9 +34,7 @@ let initialLoadPending = true;
 const initialSyncOverrides = Object.create(null);
 let initialStatsChanged = false;
 
-if (versionEl) {
-  versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
-}
+versionEl.textContent = `v${chrome.runtime.getManifest().version}`;
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 
@@ -110,50 +108,24 @@ function renderStats(stats = {}) {
   statSavedEl.textContent  = fmtBytes(stats.bytesSaved);
 }
 
-async function reloadCurrentPage() {
-  const isHttpUrl = url => /^https?:\/\//i.test(String(url || ""));
-  try {
-    // Single query covers both the fast path (active tab) and the fallback
-    // (most recently accessed HTTP(S) tab), halving the round-trips.
-    const tabs = await chrome.tabs.query({ currentWindow: true });
-    const active = tabs.find(t => t.active);
-    if (active?.id != null && isHttpUrl(active.url)) {
-      await chrome.tabs.reload(active.id);
-      return;
-    }
-
-    // When settings are opened in a new tab, the settings tab itself is active.
-    // Prefer the most recently accessed HTTP(S) tab in the same window.
-    const page = tabs
-      .filter(tab => tab.id != null && isHttpUrl(tab.url))
-      .sort((a, b) => Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0))[0];
-    if (page?.id != null) await chrome.tabs.reload(page.id);
-  } catch {}
-}
-
 // ── Preset helpers ────────────────────────────────────────────────────────────
 
 // Quality presets: highlight the button whose value matches, or none for custom.
-function setQualityUI(q) {
+// keepTypedValue leaves a custom field alone while the user is editing it, so a
+// change that arrives from another page cannot erase their unsaved input.
+function setQualityUI(q, { keepTypedValue = false } = {}) {
   q = Number(q);
   qualityPresets.forEach(b => b.classList.toggle("active", Number(b.dataset.q) === q));
-  // Keep custom field in sync
-  if (!QUALITY_PRESETS.includes(q)) {
-    customQualityEl.value = q;
-  } else {
-    customQualityEl.value = "";
-  }
+  if (keepTypedValue && customQualityEl.value.trim() !== "") return;
+  customQualityEl.value = QUALITY_PRESETS.includes(q) ? "" : q;
 }
 
 // Width presets: same pattern.
-function setWidthUI(w) {
+function setWidthUI(w, { keepTypedValue = false } = {}) {
   w = Number(w);
   widthPresets.forEach(b => b.classList.toggle("active", Number(b.dataset.w) === w));
-  if (!WIDTH_PRESETS.includes(w)) {
-    customWidthEl.value = w;
-  } else {
-    customWidthEl.value = "";
-  }
+  if (keepTypedValue && customWidthEl.value.trim() !== "") return;
+  customWidthEl.value = WIDTH_PRESETS.includes(w) ? "" : w;
 }
 
 // Read the currently selected quality value (preset or custom).
@@ -219,11 +191,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
     if ("quality" in changes) {
       savedQuality = normalizeQuality(changes.quality.newValue ?? DEFAULTS.quality);
-      setQualityUI(savedQuality);
+      setQualityUI(savedQuality, { keepTypedValue: true });
     }
     if ("maxWidth" in changes) {
       savedWidth = normalizeWidth(changes.maxWidth.newValue ?? DEFAULTS.maxWidth);
-      setWidthUI(savedWidth);
+      setWidthUI(savedWidth, { keepTypedValue: true });
     }
   } else if (area === "local" && changes.stats) {
     if (initialLoadPending) initialStatsChanged = true;
@@ -275,7 +247,7 @@ enabledEl.addEventListener("change", async () => {
     showToast("Couldn't update compression", "err");
     return;
   }
-  await reloadCurrentPage();
+  await reloadWebTab({ fallbackToRecent: true });
   showToast(enabled ? "Compression enabled" : "Compression disabled", "ok");
 });
 
@@ -345,7 +317,7 @@ async function save() {
   if (!current || quality !== previousQuality ||
       maxWidth !== previousMaxWidth ||
       normalizeDomainsKey(excludeDomains) !== normalizeDomainsKey(current.excludeDomains)) {
-    await reloadCurrentPage();
+    await reloadWebTab({ fallbackToRecent: true });
   }
 
   // Keep the "restore on clear" values and preset highlights in step with storage.
@@ -374,7 +346,7 @@ async function resetAll() {
     normalizeDomainsKey(current.excludeDomains ?? DEFAULTS.excludeDomains) !== normalizeDomainsKey(DEFAULTS.excludeDomains) ||
     !!current.grayscale !== DEFAULTS.grayscale;
   applySettings(DEFAULTS);
-  if (affectsCurrentPage) await reloadCurrentPage();
+  if (affectsCurrentPage) await reloadWebTab({ fallbackToRecent: true });
   showToast("Reset to defaults");
 }
 
@@ -398,6 +370,11 @@ resetAllBtn.addEventListener("click", resetAll);
 resetStatsBtn.addEventListener("click", resetStats);
 
 
-[excludeEl, customQualityEl, customWidthEl].forEach(el => {
+// Enter saves from the single-line fields. The exclusion list is multi-line, so
+// there Enter must insert a newline and Ctrl/⌘+Enter saves instead.
+[customQualityEl, customWidthEl].forEach(el => {
   el.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); save(); } });
+});
+excludeEl.addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
 });

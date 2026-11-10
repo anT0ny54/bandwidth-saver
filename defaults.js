@@ -26,3 +26,25 @@ export function parseDomains(text) {
     .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
     .filter(Boolean);
 }
+
+// Reloads the web page the user is working on. The active tab wins when it is
+// an HTTP(S) page. With fallbackToRecent (used by the settings tab, which is
+// itself the active tab after opening from the popup) the most recently
+// accessed HTTP(S) tab in the same window is reloaded instead. Errors are
+// swallowed: a failed reload only means the user reloads by hand.
+export async function reloadWebTab({ fallbackToRecent = false } = {}) {
+  const isHttpUrl = url => /^https?:\/\//i.test(String(url || ""));
+  try {
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const active = tabs.find(t => t.active);
+    if (active?.id != null && isHttpUrl(active.url)) {
+      await chrome.tabs.reload(active.id);
+      return;
+    }
+    if (!fallbackToRecent) return;
+    const page = tabs
+      .filter(tab => tab.id != null && isHttpUrl(tab.url))
+      .sort((a, b) => Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0))[0];
+    if (page?.id != null) await chrome.tabs.reload(page.id);
+  } catch {}
+}

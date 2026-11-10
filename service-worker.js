@@ -14,8 +14,8 @@
 //  approach in MV3.
 //
 //  DNR is kept only for header work, which needs no URL encoding: Rule 2
-//  strips CSP response headers while image compression is enabled. Rule 3
-//  adds Save-Data whenever its own setting is on, independently of compression.
+//  strips CSP response headers while image compression is enabled. Rules 3 and 4
+//  add Save-Data whenever its own setting is on, independently of compression.
 //
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -36,8 +36,22 @@ const DEFAULTS = {
 // leftover rule from a previous version of the extension is cleaned up.
 const RULE_ID_REDIRECT = 1;  // legacy — removed, never re-added
 const RULE_ID_CSP      = 2;  // strips CSP headers so proxy images can load
-const RULE_ID_SAVEDATA  = 3;  // sends Save-Data: on to compatible web requests
-const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP, RULE_ID_SAVEDATA];
+const RULE_ID_SAVEDATA  = 3;  // sends Save-Data: on to compatible subresource/frame requests
+const RULE_ID_SAVEDATA_DOC = 4; // same header for top-level navigations (see doRefreshRules)
+const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP, RULE_ID_SAVEDATA, RULE_ID_SAVEDATA_DOC];
+
+// Stable serialization (sorted object keys). Used to decide whether a settings
+// mirror or a DNR ruleset actually changed before writing it again.
+function canonicalJson(value) {
+  if (Array.isArray(value)) return "[" + value.map(canonicalJson).join(",") + "]";
+  if (value && typeof value === "object") {
+    return "{" + Object.keys(value).sort()
+      .filter(k => value[k] !== undefined)
+      .map(k => JSON.stringify(k) + ":" + canonicalJson(value[k]))
+      .join(",") + "}";
+  }
+  return JSON.stringify(value);
+}
 
 // ── Concurrency guard ─────────────────────────────────────────────────────────
 let refreshing        = false;
@@ -126,14 +140,25 @@ function mirrorToLocal() {
           finish();
           return;
         }
-        chrome.storage.local.set({ bhOpts: opts }, function() {
-          // A write callback can arrive after its watchdog and a newer mirror
-          // have completed. Re-read sync so a late old write cannot be final.
-          if (settled || generation !== mirrorGeneration) {
-            mirrorToLocal();
+        // The service worker wakes often (every proxied image response is a
+        // webRequest event). Skip the write, and the storage.onChanged
+        // broadcast it causes in every open tab, when nothing changed.
+        chrome.storage.local.get({ bhOpts: null }, function(current) {
+          if (settled || generation !== mirrorGeneration) return;
+          const readError = chrome.runtime.lastError?.message || "";
+          if (!readError && current && canonicalJson(current.bhOpts) === canonicalJson(opts)) {
+            finish();
             return;
           }
-          finish();
+          chrome.storage.local.set({ bhOpts: opts }, function() {
+            // A write callback can arrive after its watchdog and a newer mirror
+            // have completed. Re-read sync so a late old write cannot be final.
+            if (settled || generation !== mirrorGeneration) {
+              mirrorToLocal();
+              return;
+            }
+            finish();
+          });
         });
       } catch {
         finish();
@@ -308,8 +333,8 @@ function flushStats() {
       // is dropped with one warning instead of retrying every 750 ms forever.
       // During a reset the batch is discarded by design and must not count.
       if (!statsResetPending) {
+        statsFlushFailures++;
         if (statsFlushFailures < MAX_STATS_FLUSH_FAILURES) {
-          statsFlushFailures++;
           pendingStats.filesProcessed += retryDelta.filesProcessed;
           pendingStats.bytesProcessed += retryDelta.bytesProcessed;
           pendingStats.bytesSaved += retryDelta.bytesSaved;
@@ -475,7 +500,7 @@ function onProxyCompleted({ responseHeaders, fromCache, statusCode }) {
 // ── DNR rules ─────────────────────────────────────────────────────────────────
 // Rule 1 (redirect) is intentionally not added — see top-of-file explanation.
 // Rule 2 (CSP stripping) is active only while image compression is enabled.
-// Rule 3 (Save-Data) follows its own setting, even when compression is disabled.
+// Rules 3 and 4 (Save-Data) follow their own setting, even when compression is disabled.
 //
 // Uses callback form throughout — the Promise-returning form of chrome APIs
 // (e.g. await chrome.storage.sync.get()) is not available in classic
@@ -534,72 +559,97 @@ function doRefreshRules(finish, generation) {
           });
         }
 
-        // Rule 3: Replaces the old MV2 webRequestBlocking implementation.
-        // DNR can safely set the request header in MV3 without blocking JavaScript.
+        // Rules 3 and 4: Save-Data. This replaces the old MV2 webRequestBlocking
+        // implementation; DNR sets the request header in MV3 without blocking JavaScript.
         if (opts.saveData) {
           // IMPORTANT: urlFilter uses DNR's filter syntax, not a JavaScript
           // regular expression. "^https?://" therefore does NOT mean "start of
           // an http(s) URL" and the old rule never matched normal requests.
           // Use regexFilter for an actual beginning-of-URL expression.
-          // Intentionally matches ALL request types: Save-Data is a document-wide
-          // client hint — servers may serve lower-data stylesheets, scripts and
-          // fonts as well as images, so restricting resourceTypes would weaken it.
-          const saveDataCondition = {
-            regexFilter: "^https?://"
-          };
+          //
+          // Save-Data is a document-wide client hint, so it must reach every
+          // request type. A rule without resourceTypes matches all types EXCEPT
+          // main_frame, and the top-level navigation is exactly the request a
+          // server uses to choose a lower-data page. Rule 3 therefore covers
+          // everything else and rule 4 covers main_frame, with no hard-coded
+          // type list that a future or unsupported type name could invalidate.
+          const saveDataAction = () => ({
+            type: "modifyHeaders",
+            requestHeaders: [{ header: "Save-Data", operation: "set", value: "on" }]
+          });
+          const saveDataCondition = { regexFilter: "^https?://" };
+          const saveDataDocCondition = { regexFilter: "^https?://", resourceTypes: ["main_frame"] };
           if (excludedDomainList.length) {
             saveDataCondition.excludedRequestDomains = excludedDomainList;
             saveDataCondition.excludedInitiatorDomains = excludedDomainList;
+            saveDataDocCondition.excludedRequestDomains = excludedDomainList;
+            saveDataDocCondition.excludedInitiatorDomains = excludedDomainList;
           }
 
-          addRules.push({
-            id: RULE_ID_SAVEDATA,
-            priority: 2,
-            action: {
-              type: "modifyHeaders",
-              requestHeaders: [
-                { header: "Save-Data", operation: "set", value: "on" }
-              ]
-            },
-            condition: saveDataCondition
-          });
+          addRules.push({ id: RULE_ID_SAVEDATA, priority: 2, action: saveDataAction(), condition: saveDataCondition });
+          addRules.push({ id: RULE_ID_SAVEDATA_DOC, priority: 2, action: saveDataAction(), condition: saveDataDocCondition });
         }
 
-        chrome.declarativeNetRequest.updateDynamicRules(
-          { removeRuleIds: ALL_RULE_IDS, addRules: addRules },
-          function() {
-            if (generation !== refreshGeneration) {
-              // The request reached DNR after its watchdog expired or a newer
-              // refresh started. Release this guard before scheduling the fresh
-              // refresh — returning without finish() left `refreshing` true and
-              // wedged every later rules refresh behind it until the 5-second
-              // watchdog fired. finish() is idempotent, so the call is safe
-              // when this operation already completed via its watchdog.
-              // Capture BEFORE finish(): finish() resets the shared `refreshing`
-              // guard, so a check afterwards could never detect a newer refresh
-              // already in flight and would always queue a redundant rebuild.
-              const superseded = refreshing;
-              finish();
-              // When a newer refresh is already running, its ruleset supersedes
-              // this stale one: rescheduling would only queue a guaranteed
-              // no-op rebuild behind it. Reschedule only when nothing else will.
-              if (!superseded) refreshRules();
-              return;
-            }
-            try {
-              if (chrome.runtime.lastError) {
-                console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", chrome.runtime.lastError.message);
-              }
-            } finally {
-              finish();
-            }
-          }
-        );
+        applyDynamicRules(addRules, finish, generation);
       } catch (error) {
         console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", error);
         finish();
       }
     });
+  } catch (error) {
+    console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", error);
+    finish();
+  }
+}
+
+// Releases a refresh whose result arrived after its watchdog or a newer refresh.
+// Capture `refreshing` BEFORE finish(): finish() resets the shared guard, so a
+// check afterwards could never detect a newer refresh already in flight. When a
+// newer refresh is running, its ruleset supersedes this one; reschedule only
+// when nothing else will.
+function releaseStaleRefresh(finish) {
+  const superseded = refreshing;
+  finish();
+  if (!superseded) refreshRules();
+}
+
+// Writes the ruleset only when it differs from the one DNR already holds. The
+// worker re-runs this on every wake, and an identical rebuild is wasted work.
+function applyDynamicRules(addRules, finish, generation) {
+  const sortById = rules => rules.slice().sort((a, b) => a.id - b.id);
+  chrome.declarativeNetRequest.getDynamicRules(function(current) {
+    if (generation !== refreshGeneration) { releaseStaleRefresh(finish); return; }
+    const readError = chrome.runtime.lastError?.message || "";
+    if (!readError && Array.isArray(current) &&
+        canonicalJson(sortById(current)) === canonicalJson(sortById(addRules))) {
+      finish();
+      return;
+    }
+    writeDynamicRules(addRules, finish, generation);
+  });
+}
+
+function writeDynamicRules(addRules, finish, generation) {
+  try {
+    chrome.declarativeNetRequest.updateDynamicRules(
+      { removeRuleIds: ALL_RULE_IDS, addRules: addRules },
+      function() {
+        if (generation !== refreshGeneration) {
+          // The request reached DNR after its watchdog expired or a newer
+          // refresh started. Release this guard before scheduling the fresh
+          // refresh; finish() is idempotent, so this is safe either way.
+          releaseStaleRefresh(finish);
+          return;
+        }
+        try {
+          if (chrome.runtime.lastError) {
+            console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", chrome.runtime.lastError.message);
+          }
+        } finally {
+          finish();
+        }
+      }
+    );
   } catch (error) {
     console.warn("[Bandwidth Saver] Failed to refresh DNR rules:", error);
     finish();

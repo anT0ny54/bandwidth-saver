@@ -84,14 +84,19 @@
   const FAILED_PROXY_SRCSET_ATTR = "data-bw-failed-proxy-srcset";
   const ORIGINAL_PRELOAD_HREF_ATTR = "data-bw-original-preload-href";
   const APPLIED_PRELOAD_HREF_ATTR = "data-bw-applied-preload-href";
+  const ORIGINAL_PRELOAD_IMAGESRCSET_ATTR = "data-bw-original-preload-imagesrcset";
+  const APPLIED_PRELOAD_IMAGESRCSET_ATTR = "data-bw-applied-preload-imagesrcset";
   // Shared pattern for inline background-image url(...) tokens; safe to reuse
   // (String.replace always starts global regexes from index 0 and resets
   // lastIndex afterwards).
   const BG_URL_RE = /url\(\s*(?:(['"])(.*?)\1|([^)]*?))\s*\)/gi;
-  // Written by prehook.js (MAIN world) while a preload href is parked on
-  // about:blank; the isolated layer must clear it on restore too, or a stale
-  // stash could re-park the link later.
+  // Cheap pre-test: only a style value containing url( can carry a background
+  // image that rewriteBg() would change.
+  const STYLE_URL_HINT_RE = /url\(/i;
+  // Written by prehook.js (MAIN world) while preload href/imagesrcset values
+  // are parked; the isolated layer also clears these stashes on restore.
   const PENDING_PRELOAD_HREF_ATTR = "data-bh-preload-href";
+  const PENDING_PRELOAD_IMAGESRCSET_ATTR = "data-bh-preload-imagesrcset";
   let excludedDomains = new Set();
   // Single source of truth: derive from WSRV_PROXY so a proxy change only
   // ever needs one edit.
@@ -220,7 +225,7 @@
     }));
   }
 
-  // saveData is header-only state (DNR rule 3, owned by the service worker);
+  // saveData is header-only state (DNR rules 3 and 4, owned by the service worker);
   // neither this layer nor the MAIN world reads it, so a Save-Data-only
   // change must not invalidate the proxy URL and srcset caches.
   // KEEP IN SYNC with prehook.js.
@@ -672,38 +677,53 @@
     doneBg.add(el);
   }
 
-  // ── D) <link rel="preload" as="image"> rewriting ──────────────────────────
-  // Parser-created preload links bypass prehook's JS patches. Rewrite the href
-  // to the proxy URL so the preloaded bytes are compressed instead of the
-  // original full-resolution image. Keep the original href so the isolated
-  // layer can also restore it if the link is repurposed before prehook sees
-  // the change.
+  // ── D) Image preload rewriting ─────────────────────────────────────────────
+  // Parser-created preload links bypass prehook's JS patches. Rewrite both the
+  // href and responsive imagesrcset candidate URLs so preloaded bytes use the
+  // proxy instead of the original full-resolution sources. Keep originals so
+  // this layer can restore them if a link is repurposed before prehook sees it.
   function restorePreloadHref(el) {
     // Fall back to the MAIN-world pending stash (prehook.js parks a preload's
     // original href in data-bh-preload-href while href="about:blank"), so a
     // parked link can never be left pointing at about:blank by this layer.
     const original = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) ||
       el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
-    if (!original) return;
-
-    const current = el.getAttribute("href") || "";
-    const applied = el.getAttribute(APPLIED_PRELOAD_HREF_ATTR);
-    // Do not overwrite a newer URL deliberately assigned by the page.
-    if (current === "about:blank" || (applied && current === applied)) {
-      el.setAttribute("href", original);
+    if (original) {
+      const current = el.getAttribute("href") || "";
+      const applied = el.getAttribute(APPLIED_PRELOAD_HREF_ATTR);
+      // Do not overwrite a newer URL deliberately assigned by the page.
+      if (current === "about:blank" || (applied && current === applied)) {
+        el.setAttribute("href", original);
+      }
     }
     el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
     el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
     el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
   }
 
+  function restorePreloadImagesrcset(el) {
+    const original = el.getAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR) ||
+      el.getAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+    if (original) {
+      const current = el.getAttribute("imagesrcset") || "";
+      const applied = el.getAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+      // The empty value is the MAIN-world parking placeholder. Otherwise only
+      // replace the exact value that this extension wrote, preserving page edits.
+      if (current === "" || (applied && current === applied)) {
+        el.setAttribute("imagesrcset", original);
+      }
+    }
+    el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+    el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+    el.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+  }
+
   function rewritePreload(el) {
     if (!el || el.tagName !== "LINK") return;
 
-    // Settings not loaded yet: prehook.js may have parked this link on
-    // about:blank with the original stashed in data-bh-preload-href.
-    // Do NOT restore here — un-parking before settings are known would
-    // restart the full-resolution download the parking was preventing.
+    // Settings not loaded yet: prehook.js may have parked either preload URL.
+    // Do NOT restore while settings are unknown; that would restart an
+    // unoptimized full-resolution request.
     if (!opts) return;
 
     const as = String(el.getAttribute("as") || "").toLowerCase();
@@ -711,43 +731,58 @@
     const isImagePreload = /(?:^|\s)preload(?:\s|$)/i.test(el.rel || "") &&
       (as === "image" || (!as && /^image\//i.test(type)));
 
-    if (!isImagePreload) {
+    if (!isImagePreload || !opts.enabled) {
       restorePreloadHref(el);
+      restorePreloadImagesrcset(el);
       return;
     }
 
+    // `href` and responsive `imagesrcset` are independent preload sources.
+    // Some responsive hints provide only imagesrcset, with no href at all.
     const href = el.getAttribute("href");
     if (href === null) {
       el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
       el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
       el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
-      return;
-    }
-    const savedOriginal = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
-    const original = savedOriginal ||
-      el.getAttribute(PENDING_PRELOAD_HREF_ATTR) || href;
-
-    if (!opts.enabled) {
-      restorePreloadHref(el);
-      return;
-    }
-
-    const u = original ? resolveImage(original) : null;
-    if (!u || shouldSkip(u)) {
-      restorePreloadHref(el);
-      return;
-    }
-
-    const proxy = buildProxyUrl(u.href);
-    if (proxy !== original) {
-      el.setAttribute(ORIGINAL_PRELOAD_HREF_ATTR, original);
-      el.setAttribute(APPLIED_PRELOAD_HREF_ATTR, proxy);
     } else {
-      el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
-      el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+      const original = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) ||
+        el.getAttribute(PENDING_PRELOAD_HREF_ATTR) || href;
+      const u = original ? resolveImage(original) : null;
+      if (!u || shouldSkip(u)) {
+        restorePreloadHref(el);
+      } else {
+        const proxy = buildProxyUrl(u.href);
+        if (proxy !== original) {
+          el.setAttribute(ORIGINAL_PRELOAD_HREF_ATTR, original);
+          el.setAttribute(APPLIED_PRELOAD_HREF_ATTR, proxy);
+        } else {
+          el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+          el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+        }
+        el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
+        if (href !== proxy) el.setAttribute("href", proxy);
+      }
     }
-    el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
-    if (href !== proxy) el.setAttribute("href", proxy);
+
+    const imagesrcset = el.getAttribute("imagesrcset");
+    if (imagesrcset === null) {
+      el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+      el.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+    } else {
+      const original = el.getAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR) ||
+        el.getAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR) || imagesrcset;
+      const rewritten = rewriteSrcsetValue(original, el, srcsetCache, false);
+      if (rewritten !== original) {
+        el.setAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR, original);
+        el.setAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR, rewritten);
+      } else {
+        el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+        el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+      }
+      el.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+      if (imagesrcset !== rewritten) el.setAttribute("imagesrcset", rewritten);
+    }
   }
 
   // Include all <source> nodes so one moved out of <picture> can have any
@@ -934,7 +969,9 @@
             clearStaleOriginal(t, false);
           }
         } else if (t.tagName === "LINK" &&
-                   (m.attributeName === "href" || m.attributeName === "rel" || m.attributeName === "as" || m.attributeName === "type")) {
+                   (m.attributeName === "href" || m.attributeName === "rel" ||
+                    m.attributeName === "as" || m.attributeName === "type" ||
+                    m.attributeName === "imagesrcset")) {
           preloadTargets.add(t);
         }
       }
@@ -983,22 +1020,34 @@
             !target.hasAttribute(name)) {
           target.removeAttribute(`data-bh-pending-${name}`);
         }
-        if (name === "href" && target.tagName === "LINK" && !target.hasAttribute("href")) {
-          target.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
-          target.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
-          target.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
+        if (target.tagName === "LINK" && !target.hasAttribute(name)) {
+          if (name === "href") {
+            target.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+            target.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
+            target.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
+          } else if (name === "imagesrcset") {
+            target.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+            target.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+            target.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+          }
         }
         if (name === "loading") continue;
         // The observer's attribute filter is document-wide, so drop records that
         // processMutations() would ignore anyway (e.g. <a href>, <script src>,
         // <iframe src>, <video src> churn) before they consume the bounded queue
         // and force early overflow reconciles. href/rel/as/type only matter on
-        // <link>; src/srcset and lazy data-* only on <img>/<source>; style is
-        // kept for every element.
-        if (name !== "style") {
+        // <link>; src/srcset and lazy data-* only on <img>/<source>.
+        if (name === "style") {
+          // Inline style churn (animations) is the largest mutation source on
+          // modern pages. rewriteBg() only ever acts on a url(...) present in
+          // the CURRENT value, so every other style record is dropped here
+          // instead of overflowing the bounded queue into a full-document
+          // reconcile.
+          if (!STYLE_URL_HINT_RE.test(target.getAttribute("style") || "")) continue;
+        } else {
           const tag = target.tagName;
           const linkAttr = name === "href" || name === "rel" ||
-            name === "as" || name === "type";
+            name === "as" || name === "type" || name === "imagesrcset";
           const imageTarget = tag === "IMG" ||
             (tag === "SOURCE" && target.parentElement?.tagName === "PICTURE");
           if (linkAttr ? tag !== "LINK" : !imageTarget) continue;
@@ -1056,7 +1105,7 @@
     childList:       true,
     subtree:         true,
     attributes:      true,
-    attributeFilter: ["src", "srcset", "style", "loading", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as", "type"]
+    attributeFilter: ["src", "srcset", "style", "loading", ...LAZY_ATTRS, "data-srcset", "href", "rel", "as", "type", "imagesrcset"]
   });
 
   // ── Load settings then process page ───────────────────────────────────────
@@ -1157,7 +1206,8 @@
       }
       // Keep the fast mirror current on forks where the service worker may be
       // asleep; the local change echo is ignored by the sameOpts check above.
-      try { chrome.storage.local.set({ bhOpts: next }); } catch {}
+      // Write the normalized snapshot, never the raw sync values.
+      try { chrome.storage.local.set({ bhOpts: opts }); } catch {}
     }
   });
 

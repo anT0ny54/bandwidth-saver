@@ -17,22 +17,22 @@
 
 - **MAIN-world early interception** at `document_start`.
 - **JSON/DOM-event settings bridge** from isolated `content.js` to MAIN-world `prehook.js`.
-- **Temporary parking** of page-created images, `srcset`, image preloads, and loading assignments until settings arrive. A newer assignment replaces its queued value, while removing `src`, `srcset`, `loading`, or an image-preload `href` cancels the corresponding pending restore.
+- **Temporary parking** of page-created images, `srcset`, image preloads (`href` and responsive `imagesrcset`), and loading assignments until settings arrive. A newer assignment replaces its queued value, while removing `src`, `srcset`, `loading`, an image-preload `href`, or `imagesrcset` cancels the corresponding pending restore.
 - **Normal images and `srcset`** including `<picture>` / `<source>` candidates.
 - **Lazy-loading attributes:** `data-src`, `data-iurl`, `data-lazy-src`, `data-original`, `data-url`, `data-hi-res`, `data-lazy`, `data-echo`, and `data-srcset` — rewritten **only** on `<img>` and `<picture><source>` elements, and only when the value looks like a URL or path (contains a `/` or `.`), so flag-style values such as `data-lazy="true"` are never turned into a proxied `https://host/true`. Generic elements are left untouched (their `data-*` payloads can be video, pages, or scripts), and media `<source>` elements inside `<video>`/`<audio>` pass through untouched, including while settings are still loading. Eligibility is re-checked when queued work is flushed, so a `<source>` moved out of `<picture>` before settings arrive is not proxied as media. A previously proxied source moved into `<video>`/`<audio>` restores only attributes that still contain a proxy URL. If a lazy loader copied a proxied `data-srcset` into `srcset`, that candidate's original is kept separately before a later `data-srcset` reassignment and can restore `srcset` even when there was no separate `srcset` fallback marker; a newer non-proxy `src` or `data-srcset` is preserved. Each rewritten lazy `data-*` URL is also restored only while it still contains the proxy URL. A source moved into a `<picture>` becomes eligible when inserted there.
-- **Image preloads:** `<link rel="preload" as="image">`, including dynamically assigned `href`, `rel`, `as`, and `type`; HTML preload token matching is ASCII case-insensitive, so forms such as `rel="PreLoad"` are also discovered. The MAIN-world hook rewrites or parks URLs before activating a preload when possible. Both layers retain the original URL and restore it if the link is repurposed, including preloads the MAIN-world hook parked on `about:blank` with the original stashed in `data-bh-preload-href` while settings were loading. The isolated layer never restores a parked preload before settings are known, so parking cannot be undone early by a mutation batch racing the storage read.
+- **Image preloads:** `<link rel="preload" as="image">`, including `href` and responsive `imagesrcset` candidate lists, dynamically assigned through properties, attributes, or `relList` token operations (`add`, `remove`, `replace`, `toggle`, and `.value`). HTML preload token matching is ASCII case-insensitive, so forms such as `rel="PreLoad"` are also discovered. The MAIN-world hook rewrites or parks both URL sources before activating a preload when possible; an `imagesrcset`-only responsive hint is covered even without `href`. Both layers retain the original values and restore them if the link is repurposed, including values parked while settings were loading. The isolated layer never restores a parked preload before settings are known, so parking cannot be undone early by a mutation batch racing the storage read. Removing either preload attribute clears its saved/parked state.
 - **Inline CSS backgrounds:** best-effort rewriting of HTTP(S) `url(...)` values in inline `background-image`.
 - **Dynamic DOM support:** mutation observers process inserted and changed elements.
 - **Per-image proxy fallback:** failed proxy image loads restore only `src`, `srcset`, `data-srcset`, and lazy attributes that still contain a proxy URL; a saved `data-srcset` original can also restore `srcset` when a lazy loader copied the proxied candidate there, and is retained separately if `data-srcset` is later reassigned. Newer non-proxy attribute values are preserved. Immediate retries of the same failed proxy URL are ignored, while the element can be reused for a different image. Reassigned lazy-image URLs refresh their saved fallback, so a later proxy failure cannot restore a stale URL from the previous assignment.
 - **Configurable quality, grayscale, maximum width, and excluded domains.**
-- **Consistent exclusion parsing:** excluded domains accept space, comma, or any whitespace separation; optional schemes/paths, leading dots, and trailing dots are normalized identically in the popup, settings page (both via the shared `parseDomains()` in `defaults.js`, which also drops entries that normalize to nothing, such as a bare `https://`), isolated content script, MAIN-world prehook, and DNR rule code.
+- **Consistent exclusion parsing:** excluded domains accept space, comma, or any whitespace separation; optional schemes/paths, leading dots, and trailing dots are normalized identically in the popup, settings page (both via the shared `parseDomains()` in `defaults.js`, which also drops entries that normalize to nothing, such as a bare `https://`), isolated content script, and MAIN-world prehook. The DNR rule code uses the same normalization and additionally drops entries that cannot be valid hostnames; such entries could never match a page host, so their effect is the same.
 - **Double-proxy protection:** wsrv.nl URLs are never wrapped again.
-- **Bounded URL/cache work:** proxy URL caches are capped, srcset work is cached per element, the device-pixel-ratio clamp is computed once per settings change, generic non-image `data-*` lazy attributes are never scanned, nested added DOM roots are skipped because an ancestor's scan already covers them (no quadratic rescans while the parser streams a deep subtree), mutation records that cannot affect any rewrite (e.g. `<a href>`, `<script src>`, `<iframe src>`, `<video src>` churn and media `<source>` elements outside `<picture>`) are filtered out before they reach the bounded queue (a changed `srcset`/`data-srcset` is kept when **any** candidate is still rewriteable, not just the first), elements with nothing left to rewrite stay marked done so full-page rescans skip them, `<source>` elements are reconsidered when moved into a `<picture>`, `srcset`/`data-srcset` attributes are written only when the rewritten value differs (so a mixed list such as `icon.svg 1x, photo.jpg 2x` cannot make the content script re-trigger itself), the original `data-srcset` fallback is kept separately from a real `srcset` fallback, fragment-only CSS URLs are left untouched, the style mutation caused by the script's own inline-background rewrite is not re-parsed, non-image elements and elements without a `style` attribute are skipped before any image/background work, and the MAIN-world `setAttribute` hook exits immediately for every attribute it does not intercept. The isolated mutation queue admits each observer batch in a single pass (pending-state cleanup runs inline with queue filtering), and after the bounded queue overflows it keeps cleaning later records while queuing nothing more. Lazy URL extension filtering uses the resolved URL pathname (not query-string text), and `.php` endpoints remain eligible because they can serve images. Original-source fallback metadata is cleared when its current source is no longer proxied, avoiding restoration of an obsolete URL after a page reuses an image element; the cleanup also runs when a lazy element is revisited but none of its current lazy attributes are rewriteable, so orphaned fallback markers cannot survive a source swap.
-- **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup. Partial/older mirrors are merged with the shared defaults before use. The mirror's watchdog also invalidates a late-arriving sync snapshot after a timeout, so a stale read can never overwrite a newer mirror (the same stale-callback protection as the DNR-refresh and statistics guards).
+- **Bounded URL/cache work:** proxy URL caches are capped, srcset work is cached per element, the device-pixel-ratio clamp is computed once per settings change, generic non-image `data-*` lazy attributes are never scanned, nested added DOM roots are skipped because an ancestor's scan already covers them (no quadratic rescans while the parser streams a deep subtree), mutation records that cannot affect any rewrite (e.g. `<a href>`, `<script src>`, `<iframe src>`, `<video src>` churn and media `<source>` elements outside `<picture>`) are filtered out before they reach the bounded queue (a changed `srcset`/`data-srcset` is kept when **any** candidate is still rewriteable, not just the first), elements with nothing left to rewrite stay marked done so full-page rescans skip them, `<source>` elements are reconsidered when moved into a `<picture>`, `srcset`/`data-srcset` attributes are written only when the rewritten value differs (so a mixed list such as `icon.svg 1x, photo.jpg 2x` cannot make the content script re-trigger itself), the original `data-srcset` fallback is kept separately from a real `srcset` fallback, fragment-only CSS URLs are left untouched, the style mutation caused by the script's own inline-background rewrite is not re-parsed, non-image elements and elements without a `style` attribute are skipped before any image/background work, and inline `style` records that contain no `url(...)` are dropped before queueing (rewriting only acts on the current value, and animation churn would otherwise overflow the queue into full-page rescans), and the MAIN-world `setAttribute` hook exits immediately for every attribute it does not intercept. The isolated mutation queue admits each observer batch in a single pass (pending-state cleanup runs inline with queue filtering), and after the bounded queue overflows it keeps cleaning later records while queuing nothing more. Lazy URL extension filtering uses the resolved URL pathname (not query-string text), and `.php` endpoints remain eligible because they can serve images. Original-source fallback metadata is cleared when its current source is no longer proxied, avoiding restoration of an obsolete URL after a page reuses an image element; the cleanup also runs when a lazy element is revisited but none of its current lazy attributes are rewriteable, so orphaned fallback markers cannot survive a source swap.
+- **Fast settings mirror:** `storage.sync` is mirrored to `storage.local` as `bhOpts` for faster content-script startup. Partial/older mirrors are merged with the shared defaults before use. The mirror's watchdog also invalidates a late-arriving sync snapshot after a timeout, so a stale read can never overwrite a newer mirror (the same stale-callback protection as the DNR-refresh and statistics guards). The mirror is rewritten only when its contents differ, and the content script mirrors the normalized settings snapshot, never raw sync values. Because the worker wakes on every proxied image response, the DNR ruleset is likewise rewritten only when it differs from the one Chrome already holds.
 - **Batched statistics:** proxy response sizes are accumulated and flushed about every 750 ms; a failed read of the stored totals keeps the batch for retry (at most 3 consecutive attempts, after which the batch is dropped with one warning) instead of overwriting the totals with it, a batch already returned by the watchdog is never written a second time, and malformed/non-finite stored totals (including a primitive or array in place of the stats object) are normalized before the next write; resetting statistics clears the worker's pending batch and waits out an in-flight flush. Storage failures release the worker's internal locks without dropping the in-memory batch or leaving later settings updates stuck; storage callbacks that are silently dropped are covered by watchdog timers on the mirror, flush, reset, and DNR rule-refresh guards.
 - **Live settings updates:** an open settings page follows synced setting changes, resets, and newly flushed statistics. The toolbar icon follows the `enabled` setting, and a removed `enabled` key falls back to the default (on).
 - **CSP handling:** Declarative Net Request removes CSP response headers for eligible page/frame URLs while image compression is enabled, including non-excluded frames and popups opened from excluded sites.
-- **Independent Save-Data hint:** the optional `Save-Data: on` request header remains active when enabled, even if image compression is turned off.
+- **Independent Save-Data hint:** the optional `Save-Data: on` request header remains active when enabled, even if image compression is turned off. It is sent on every HTTP(S) request type, including top-level page navigations, via two DNR rules: rule 3 covers all types except `main_frame`, and rule 4 covers `main_frame`. DNR rules without `resourceTypes` skip `main_frame`, which is why the second rule exists.
 - **Reproducible build:** `build.sh` validates, stages, timestamps, packages, and verifies the extension deterministically.
 
 ### Default settings
@@ -92,13 +92,15 @@ Injected at `document_start`, in the MAIN execution world (`"world": "MAIN"` is 
 - `HTMLSourceElement.prototype.src`
 - `HTMLImageElement.prototype.loading`
 - `HTMLLinkElement.prototype.href`
+- `HTMLLinkElement.prototype.imageSrcset`
+- `HTMLLinkElement.prototype.relList` and the `DOMTokenList` mutation methods used by `relList`
 - `Element.prototype.setAttribute`
 
-It also observes parser-created and dynamically inserted image preloads with a `MutationObserver`. For script-created preload links, `href` is rewritten or parked before the attribute that activates an image preload is set, when possible. The original href is retained while the link is an image preload and restored if the page changes the link's purpose.
+It also observes parser-created and dynamically inserted image preloads with a `MutationObserver`. For script-created preload links, `href` and `imagesrcset` are rewritten or parked before activation through `rel`, `relList`, `as`, or `type`, when possible. The original values are retained while the link is an image preload and restored if the page changes the link's purpose.
 
 `new Image()` does not need a separate constructor replacement: its `src` assignment reaches the patched `HTMLImageElement.prototype.src` setter.
 
-If settings have not arrived, eligible page-created image URLs are temporarily replaced with `about:blank` and stored in element-local `data-bh-pending-*` state. A later page assignment supersedes the queued value; removal of an image `src`, `srcset`, or `loading` attribute clears its parked value. Removing an image-preload `href` also clears its saved/parked URL, so a later settings update cannot resurrect the removed resource. Once the settings event arrives, only still-pending work is flushed.
+If settings have not arrived, eligible page-created image URLs are temporarily replaced with `about:blank` (or an empty `srcset`/`imagesrcset`) and stored in element-local `data-bh-pending-*` state. A later page assignment supersedes the queued value; removal of an image `src`, `srcset`, or `loading` attribute clears its parked value. Removing an image-preload `href` or `imagesrcset` also clears its saved/parked URL, so a later settings update cannot resurrect the removed resource. Once the settings event arrives, only still-pending work is flushed.
 
 MAIN-world code **does not use `chrome.*` APIs**.
 
@@ -165,22 +167,34 @@ and run the build checks.
 
 An earlier DNR `regexSubstitution` approach could not safely URL-encode a captured source URL. Image URLs containing their own query strings could therefore produce malformed proxy URLs.
 
-Image URL rewriting is consequently performed by `prehook.js` and `content.js`, where `encodeURIComponent()` is available. DNR is retained for CSP response-header handling and the independent `Save-Data` request header. Legacy image redirect Rule 1 is removed on service-worker refresh.
+Image URL rewriting is consequently performed by `prehook.js` and `content.js`, where `encodeURIComponent()` is available. DNR is retained for CSP response-header handling and the independent `Save-Data` request header (rules 3 and 4). Legacy image redirect Rule 1 is removed on service-worker refresh.
 
 ## 🎯 Image-loading coverage and limits
 
 The extension covers the main DOM-driven image paths: `<img src>`,
 responsive `srcset` on `<img>` and `<picture><source>`, picture-source `src`
-property/attribute assignments, image preload links, the supported
+property/attribute assignments, image preload `href` and responsive
+`imagesrcset` candidate lists, the supported
 lazy-load `data-*` attributes, inline `background-image` URLs, and changes to
-those resources made through common DOM properties/attributes or inserted DOM
-nodes. `srcset` candidate descriptors are preserved, and each candidate is
-classified independently. Failed proxy state is limited to the failed source;
-reusing that element for a different URL can be intercepted normally.
+those resources made through common DOM properties/attributes, `relList` token
+operations, or inserted DOM nodes. `srcset` candidate descriptors are preserved,
+and each candidate is classified independently. Failed proxy state is limited to
+the failed source; reusing that element for a different URL can be intercepted
+normally.
 
 This is not a universal network-level image filter. Browser-native parser loads
 can begin before extension storage is available, and DOM rewriting may cancel
-those requests only after they have started. URLs inside external or cross-origin
+those requests only after they have started. Likewise, HTML strings parsed and
+inserted through APIs such as `innerHTML` or `insertAdjacentHTML` are observed
+after insertion; Chromium can begin a preload before the observer rewrites its
+URL. Direct page-script property, attribute, and `relList` operations are
+intercepted synchronously, but parser-driven insertion remains best-effort. The
+patched DOM entry points also preserve Web IDL string conversion: `Symbol` inputs
+throw `TypeError`, URL and responsive-candidate properties (`src`, `srcset`, `href`,
+and `imageSrcset`) normalize lone UTF-16 surrogates as `USVString`, while
+`setAttribute` keeps its `DOMString` behavior. Custom stringifiers for intercepted
+`setAttribute` names/values run only once. URLs
+inside external or cross-origin
 CSS stylesheets, shadow roots, CSS `image-set()` options written as bare strings,
 and image bytes fetched through `fetch`/XHR and later turned into blob URLs or
 canvas/WebGL content are not reliably discoverable by the current DOM hooks.
@@ -242,6 +256,7 @@ The settings page provides:
 - maximum-width presets or custom values ≥ 0
 - excluded domains
 - statistics and reset, with live updates while the page is open (resetting statistics does not discard unsaved form edits)
+- keyboard shortcuts: Enter saves from the custom quality and width fields; Ctrl/⌘+Enter saves from the excluded-sites list, where Enter inserts a newline. A quality or width change made elsewhere does not erase a custom value you are typing.
 - reset-to-defaults
 
 Quality, width, enable/disable, reset-to-defaults, and excluded-domain changes reload the active HTTP(S) page when needed. Grayscale changes show a reload prompt because already-loaded proxy images cannot be recoloured in place. Existing resources are not retroactively guaranteed to change without a reload. Save-Data changes apply to subsequent HTTP(S) requests without requiring a page reload, and the header setting remains independent of whether image compression is enabled.
@@ -303,7 +318,7 @@ GitHub Actions runs the same build on pull requests targeting `main`, pushes to 
 ```text
 bandwidth-saver/
 ├── manifest.json
-├── defaults.js            # shared DEFAULTS + parseDomains() for popup/options
+├── defaults.js            # shared DEFAULTS, parseDomains(), reloadWebTab() for popup/options
 ├── prehook.js             # MAIN-world synchronous interception
 ├── content.js             # ISOLATED-world storage + DOM processing
 ├── service-worker.js      # settings mirror, icon, stats, DNR CSP + Save-Data rules

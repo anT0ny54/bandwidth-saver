@@ -1,4 +1,4 @@
-import { DEFAULTS, parseDomains } from "./defaults.js";
+import { DEFAULTS, parseDomains, reloadWebTab } from "./defaults.js";
 
 const $ = id => document.getElementById(id);
 
@@ -32,15 +32,6 @@ const coversHost = (host, domain) => host === domain || host.endsWith(`.${domain
 function setActivePreset(q) {
   // Custom qualities should not masquerade as the closest built-in preset.
   presetBtns.forEach(b => b.classList.toggle("active", Number(b.dataset.q) === Number(q)));
-}
-
-async function reloadActiveTab() {
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id != null && /^https?:\/\//i.test(String(tab.url || ""))) {
-      await chrome.tabs.reload(tab.id);
-    }
-  } catch {}
 }
 
 function showNudge() {
@@ -100,7 +91,7 @@ enabledEl.addEventListener("change", async () => {
     return;
   }
   updateEnabledUI(enabled);
-  await reloadActiveTab();
+  await reloadWebTab();
   window.close();
 });
 
@@ -135,7 +126,7 @@ presetBtns.forEach(btn => {
       return;
     }
     state.quality = quality;
-    await reloadActiveTab();
+    await reloadWebTab();
     window.close();
   });
 });
@@ -143,7 +134,7 @@ presetBtns.forEach(btn => {
 // ── Reload current tab ────────────────────────────────────────────────────────
 
 reloadBtn.addEventListener("click", async () => {
-  await reloadActiveTab();
+  await reloadWebTab();
   window.close();
 });
 

@@ -40,6 +40,9 @@
   const ORIGINAL_PRELOAD_HREF_ATTR = "data-bw-original-preload-href";
   const APPLIED_PRELOAD_HREF_ATTR = "data-bw-applied-preload-href";
   const PENDING_PRELOAD_HREF_ATTR = "data-bh-preload-href";
+  const ORIGINAL_PRELOAD_IMAGESRCSET_ATTR = "data-bw-original-preload-imagesrcset";
+  const APPLIED_PRELOAD_IMAGESRCSET_ATTR = "data-bw-applied-preload-imagesrcset";
+  const PENDING_PRELOAD_IMAGESRCSET_ATTR = "data-bh-preload-imagesrcset";
   // Written only by content.js (which owns data-srcset fallback state), but
   // cleared here too: when a restored element is reused for a new source,
   // restoredAssignment() wipes every restore marker and this one must not
@@ -174,6 +177,13 @@
     if (srcset && el.getAttribute(ORIGINAL_SRCSET_ATTR) !== srcset) setAttr.call(el, ORIGINAL_SRCSET_ATTR, srcset);
   }
 
+  function clearPendingPreload(el) {
+    if (!el.hasAttribute(PENDING_PRELOAD_HREF_ATTR) &&
+        !el.hasAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR)) {
+      pending.delete(el);
+    }
+  }
+
   function buildProxyUrl(orig) {
     const cached = proxyUrlCache.get(orig);
     if (cached) {
@@ -248,7 +258,7 @@
     for (const el of pending) {
       pending.delete(el);
       try {
-        // <link rel="preload" as="image"> queued with a stashed original href.
+        // Image-preload links queued with a stashed href or imagesrcset value.
         if (el instanceof HTMLLinkElement) { processPreloadLink(el); continue; }
         // <img>.loading values set before settings were known.
         if (el instanceof HTMLImageElement && loadingDesc && loadingDesc.set) {
@@ -327,6 +337,15 @@
   const loadingDesc = Object.getOwnPropertyDescriptor(imgProto, "loading");
   const linkProto = HTMLLinkElement.prototype;
   const linkHrefDesc = Object.getOwnPropertyDescriptor(linkProto, "href");
+  const linkRelDesc = Object.getOwnPropertyDescriptor(linkProto, "rel");
+  const linkRelListDesc = Object.getOwnPropertyDescriptor(linkProto, "relList");
+  const tokenListProto = DOMTokenList.prototype;
+  const tokenListValueDesc = Object.getOwnPropertyDescriptor(tokenListProto, "value");
+  const relListProbe = document.createElement("link").relList;
+  const relListOwners = new WeakMap();
+  const linkAsDesc = Object.getOwnPropertyDescriptor(linkProto, "as");
+  const linkTypeDesc = Object.getOwnPropertyDescriptor(linkProto, "type");
+  const linkImageSrcsetDesc = Object.getOwnPropertyDescriptor(linkProto, "imageSrcset");
 
   function nativeSetSrc(el, v) { srcDesc.set.call(el, v); }
   function nativeSetSrcset(el, v) { srcsetDesc?.set?.call(el, v); }
@@ -347,7 +366,8 @@
     if (!el.hasAttribute(attr) && !pending.has(el)) return;
     if (el.hasAttribute(attr)) removeAttr.call(el, attr);
     if (!PENDING_IMAGE_ATTRS.some(name => el.hasAttribute(name)) &&
-        !el.hasAttribute(PENDING_PRELOAD_HREF_ATTR)) {
+        !el.hasAttribute(PENDING_PRELOAD_HREF_ATTR) &&
+        !el.hasAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR)) {
       pending.delete(el);
     }
   }
@@ -384,7 +404,7 @@
     return excludedHost(urlObj.hostname);
   }
 
-  function rewriteSrcset(ss, el) {
+  function rewriteSrcset(ss, el, remember = true) {
     if (!ss) return ss;
     if (!opts?.enabled || pageExcluded) return ss;
     if (isRestored(el)) return ss;
@@ -407,7 +427,7 @@
       return buildProxyUrl(urlObj.href) + (desc ? " " + desc : "");
     });
     const output = touched ? parts.join(", ") : ss;
-    if (output !== ss) rememberOriginal(el, null, ss);
+    if (output !== ss && remember) rememberOriginal(el, null, ss);
     srcsetCache.set(el, { input: ss, output });
     return output;
   }
@@ -457,19 +477,71 @@
   function restorePreloadHref(el) {
     const original = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) ||
       el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
-    if (!original) return;
-
-    const current = el.getAttribute("href") || "";
-    const applied = el.getAttribute(APPLIED_PRELOAD_HREF_ATTR);
-    // Do not overwrite a URL the page deliberately assigned after changing the
-    // link's purpose. Restore only our placeholder or the exact proxy URL we wrote.
-    if (current === "about:blank" || (applied && current === applied)) {
-      setAttr.call(el, "href", original);
+    if (original) {
+      const current = el.getAttribute("href") || "";
+      const applied = el.getAttribute(APPLIED_PRELOAD_HREF_ATTR);
+      // Do not overwrite a URL the page deliberately assigned after changing the
+      // link's purpose. Restore only our placeholder or the exact proxy URL we wrote.
+      if (current === "about:blank" || (applied && current === applied)) {
+        setAttr.call(el, "href", original);
+      }
     }
     el.removeAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
     el.removeAttribute(APPLIED_PRELOAD_HREF_ATTR);
     el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
-    pending.delete(el);
+    clearPendingPreload(el);
+  }
+
+  function restorePreloadImagesrcset(el) {
+    const original = el.getAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR) ||
+      el.getAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+    if (original) {
+      const current = el.getAttribute("imagesrcset") || "";
+      const applied = el.getAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+      // The empty value is our temporary parking placeholder. Otherwise restore
+      // only the exact responsive candidate list that this hook rewrote.
+      if (current === "" || (applied && current === applied)) {
+        setAttr.call(el, "imagesrcset", original);
+      }
+    }
+    el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+    el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+    el.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+    clearPendingPreload(el);
+  }
+
+  function applyPreloadImagesrcset(el, original) {
+    const current = el.getAttribute("imagesrcset") || "";
+    // An empty assignment is a clear operation, not deferred work. Do not
+    // leave an empty pending marker in the queue while settings are loading.
+    if (!original) {
+      el.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+      el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+      if (current !== original) setAttr.call(el, "imagesrcset", original);
+      clearPendingPreload(el);
+      return;
+    }
+    if (!ready || !opts) {
+      setAttr.call(el, PENDING_PRELOAD_IMAGESRCSET_ATTR, original);
+      el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+      pending.add(el);
+      if (current !== "") setAttr.call(el, "imagesrcset", "");
+      return;
+    }
+
+    const rewritten = rewriteSrcset(original, el, false);
+    el.removeAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+    if (rewritten !== original) {
+      setAttr.call(el, ORIGINAL_PRELOAD_IMAGESRCSET_ATTR, original);
+      setAttr.call(el, APPLIED_PRELOAD_IMAGESRCSET_ATTR, rewritten);
+    } else {
+      el.removeAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+      el.removeAttribute(APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+    }
+    if (current !== rewritten) setAttr.call(el, "imagesrcset", rewritten);
+    clearPendingPreload(el);
   }
 
   function applyPreloadHref(el, original) {
@@ -487,7 +559,7 @@
     }
 
     el.removeAttribute(PENDING_PRELOAD_HREF_ATTR);
-    pending.delete(el);
+    clearPendingPreload(el);
     if (decided !== original) {
       setAttr.call(el, ORIGINAL_PRELOAD_HREF_ATTR, original);
       setAttr.call(el, APPLIED_PRELOAD_HREF_ATTR, decided);
@@ -516,24 +588,42 @@
       if (!(el instanceof HTMLLinkElement)) return;
       if (!isImagePreloadLink(el)) {
         restorePreloadHref(el);
+        restorePreloadImagesrcset(el);
         return;
       }
-      const current = el.getAttribute("href");
-      if (current === null) {
+
+      const currentHref = el.getAttribute("href");
+      if (currentHref === null) {
         // The page explicitly removed href. A stale parked/saved value must
-        // not turn that removal into a later preload request.
+        // not turn that removal into a later preload request. imagesrcset can
+        // independently provide the responsive preload URL, so keep handling it.
         removeAttr.call(el, ORIGINAL_PRELOAD_HREF_ATTR);
         removeAttr.call(el, APPLIED_PRELOAD_HREF_ATTR);
         removeAttr.call(el, PENDING_PRELOAD_HREF_ATTR);
-        pending.delete(el);
-        return;
+      } else {
+        const stashedHref = el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
+        const savedHref = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
+        // decideUrl must see the ORIGINAL URL, never "about:blank".
+        const originalHref = stashedHref || savedHref || currentHref;
+        if (originalHref && originalHref !== "about:blank") {
+          applyPreloadHref(el, originalHref);
+        }
       }
-      const stashed = el.getAttribute(PENDING_PRELOAD_HREF_ATTR);
-      const savedOriginal = el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR);
-      // decideUrl must see the ORIGINAL url, never "about:blank".
-      const original = stashed || savedOriginal || current;
-      if (!original || original === "about:blank") return;
-      applyPreloadHref(el, original);
+
+      const currentImagesrcset = el.getAttribute("imagesrcset");
+      if (currentImagesrcset === null) {
+        removeAttr.call(el, ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+        removeAttr.call(el, APPLIED_PRELOAD_IMAGESRCSET_ATTR);
+        removeAttr.call(el, PENDING_PRELOAD_IMAGESRCSET_ATTR);
+      } else if (currentImagesrcset ||
+                 el.hasAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR) ||
+                 el.hasAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR)) {
+        const stashed = el.getAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR);
+        const saved = el.getAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR);
+        const original = stashed || saved || currentImagesrcset;
+        if (original) applyPreloadImagesrcset(el, original);
+      }
+      clearPendingPreload(el);
     } catch {}
   }
 
@@ -543,10 +633,9 @@
     enumerable: srcDesc.enumerable,
     get: srcDesc.get,
     set(value) {
-      // Converted outside the try so the catch handler never re-converts the
-      // same value (a Symbol would throw a ReferenceError out of the handler).
-      let s;
-      try { s = String(value); } catch { s = ""; }
+      // Convert before fail-open handling so Web IDL TypeErrors (notably for
+      // Symbol values) propagate instead of being replaced with an empty URL.
+      const s = toUSVString(value);
       const restored = restoredAssignment(this, "src", s);
       if (restored === "ignore") return;
       if (restored === "keep") { nativeSetSrc(this, s); return; }
@@ -579,8 +668,8 @@
       enumerable: srcsetDesc.enumerable,
       get: srcsetDesc.get,
       set(value) {
-        let v = "";
-        try { v = String(value); } catch {}
+        // HTMLImageElement.srcset is a USVString IDL attribute.
+        const v = toUSVString(value);
         const restored = restoredAssignment(this, "srcset", v);
         if (restored === "ignore") return;
         if (restored === "keep") { nativeSetSrcset(this, v); return; }
@@ -610,8 +699,8 @@
       enumerable: sourceSrcsetDesc.enumerable,
       get: sourceSrcsetDesc.get,
       set(value) {
-        let v = "";
-        try { v = String(value); } catch {}
+        // HTMLSourceElement.srcset is a USVString IDL attribute.
+        const v = toUSVString(value);
         const restored = restoredAssignment(this, "srcset", v);
         if (restored === "ignore") return;
         if (restored === "keep") { nativeSourceSetSrcset(this, v); return; }
@@ -650,8 +739,7 @@
       enumerable: sourceSrcDesc.enumerable,
       get: sourceSrcDesc.get,
       set(value) {
-        let s = "";
-        try { s = String(value); } catch {}
+        const s = toUSVString(value);
         const restored = restoredAssignment(this, "src", s);
         if (restored === "ignore") return;
         if (restored === "keep") { nativeSourceSetSrc(this, s); return; }
@@ -690,8 +778,7 @@
       enumerable: loadingDesc.enumerable,
       get: loadingDesc.get,
       set(value) {
-        let v = "";
-        try { v = String(value || "").toLowerCase(); } catch {}
+        const v = toDOMString(value).toLowerCase();
         try {
           if (!ready || !opts) {
             this.dataset.bhPendingLoading = v;
@@ -710,16 +797,138 @@
     });
   }
 
-  // ── Patch <link>.href property for image preloads ──────────────────────────
-  // Direct property assignment (link.href = "...") bypasses setAttribute.
+  function preparePreloadActivation(el, name, value) {
+    if (!willBeImagePreloadLink(el, name, value)) return;
+    const href = el.getAttribute(PENDING_PRELOAD_HREF_ATTR) ||
+      el.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) || el.getAttribute("href");
+    if (href && href !== "about:blank") applyPreloadHref(el, href);
+
+    const imagesrcset = el.getAttribute(PENDING_PRELOAD_IMAGESRCSET_ATTR) ||
+      el.getAttribute(ORIGINAL_PRELOAD_IMAGESRCSET_ATTR) || el.getAttribute("imagesrcset");
+    if (imagesrcset) applyPreloadImagesrcset(el, imagesrcset);
+  }
+
+  // DOMTokenList methods mutate link.rel without passing through the rel
+  // property setter or Element.setAttribute. Remember each native relList and
+  // preflight its resulting token string before the browser can activate a
+  // newly-added image preload.
+  if (linkRelListDesc?.get) {
+    Object.defineProperty(linkProto, "relList", {
+      configurable: true,
+      enumerable: linkRelListDesc.enumerable,
+      get() {
+        const list = linkRelListDesc.get.call(this);
+        if (this instanceof HTMLLinkElement) relListOwners.set(list, this);
+        return list;
+      }
+    });
+  }
+
+  function toDOMString(value) {
+    // Web IDL DOMString conversion throws for Symbol, unlike String(Symbol).
+    if (typeof value === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+    return String(value);
+  }
+
+  function toUSVString(value) {
+    // URL-reflecting DOM properties use USVString: replace lone UTF-16
+    // surrogates with U+FFFD after the same Symbol-safe conversion.
+    return toDOMString(value).replace(/[\uD800-\uDFFF]/g, (unit, index, text) => {
+      const code = unit.charCodeAt(0);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = text.charCodeAt(index + 1);
+        return next >= 0xDC00 && next <= 0xDFFF ? unit : "\uFFFD";
+      }
+      const previous = text.charCodeAt(index - 1);
+      return previous >= 0xD800 && previous <= 0xDBFF ? unit : "\uFFFD";
+    });
+  }
+
+  function patchRelListMutator(name) {
+    const descriptor = Object.getOwnPropertyDescriptor(tokenListProto, name);
+    if (!descriptor?.value || !descriptor.configurable || !tokenListValueDesc?.get ||
+        !tokenListValueDesc?.set) return;
+    Object.defineProperty(tokenListProto, name, {
+      ...descriptor,
+      value: function(...args) {
+        const link = relListOwners.get(this);
+        if (!link) return descriptor.value.apply(this, args);
+
+        // Convert caller-supplied values once, just as the native Web IDL
+        // method does. Reusing these strings for the probe and real list avoids
+        // invoking user-defined toString() methods twice.
+        let normalizedArgs;
+        if (name === "add" || name === "remove") {
+          normalizedArgs = args.map(toDOMString);
+        } else if (name === "replace") {
+          if (args.length < 2) return descriptor.value.apply(this, args);
+          normalizedArgs = args.slice();
+          normalizedArgs[0] = toDOMString(args[0]);
+          normalizedArgs[1] = toDOMString(args[1]);
+        } else {
+          if (args.length < 1) return descriptor.value.apply(this, args);
+          normalizedArgs = args.slice();
+          normalizedArgs[0] = toDOMString(args[0]);
+          if (args.length > 1) normalizedArgs[1] = !!args[1];
+        }
+
+        // Run the same native operation against a detached probe to obtain the
+        // normalized next value and preserve the native token-validation rules.
+        let predictedRel = null;
+        try {
+          tokenListValueDesc.set.call(relListProbe, tokenListValueDesc.get.call(this));
+          descriptor.value.apply(relListProbe, normalizedArgs);
+          predictedRel = tokenListValueDesc.get.call(relListProbe);
+        } catch {}
+        if (predictedRel !== null) {
+          try { preparePreloadActivation(link, "rel", predictedRel); } catch {}
+        }
+
+        const result = descriptor.value.apply(this, normalizedArgs);
+        processPreloadLink(link);
+        return result;
+      }
+    });
+  }
+
+  for (const method of ["add", "remove", "replace", "toggle"]) {
+    patchRelListMutator(method);
+  }
+
+  if (tokenListValueDesc?.get && tokenListValueDesc?.set && tokenListValueDesc.configurable) {
+    Object.defineProperty(tokenListProto, "value", {
+      ...tokenListValueDesc,
+      set(value) {
+        const link = relListOwners.get(this);
+        if (!link) return tokenListValueDesc.set.call(this, value);
+
+        // Convert once before preflight so objects with custom stringifiers
+        // observe the same single conversion as a native DOMTokenList setter.
+        const normalizedValue = toDOMString(value);
+        let predictedRel = null;
+        try {
+          tokenListValueDesc.set.call(relListProbe, normalizedValue);
+          predictedRel = tokenListValueDesc.get.call(relListProbe);
+        } catch {}
+        if (predictedRel !== null) {
+          try { preparePreloadActivation(link, "rel", predictedRel); } catch {}
+        }
+
+        tokenListValueDesc.set.call(this, normalizedValue);
+        processPreloadLink(link);
+      }
+    });
+  }
+
+  // ── Patch <link> properties for image preloads ─────────────────────────────
+  // Direct property assignments bypass Element.prototype.setAttribute.
   if (linkHrefDesc && linkHrefDesc.set) {
     Object.defineProperty(linkProto, "href", {
       configurable: true,
       enumerable: linkHrefDesc.enumerable,
       get: linkHrefDesc.get,
       set(value) {
-        let s = "";
-        try { s = String(value); } catch {}
+        const s = toUSVString(value);
         try {
           if (isImagePreloadLink(this)) {
             applyPreloadHref(this, s);
@@ -731,148 +940,192 @@
     });
   }
 
+  for (const [name, descriptor] of [["rel", linkRelDesc], ["as", linkAsDesc], ["type", linkTypeDesc]]) {
+    if (!descriptor?.set) continue;
+    Object.defineProperty(linkProto, name, {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get: descriptor.get,
+      set(value) {
+        const s = toDOMString(value);
+        try { preparePreloadActivation(this, name, s); } catch {}
+        descriptor.set.call(this, s);
+        processPreloadLink(this);
+      }
+    });
+  }
+
+  if (linkImageSrcsetDesc?.set) {
+    Object.defineProperty(linkProto, "imageSrcset", {
+      configurable: true,
+      enumerable: linkImageSrcsetDesc.enumerable,
+      get: linkImageSrcsetDesc.get,
+      set(value) {
+        // HTMLLinkElement.imageSrcset is a USVString IDL attribute.
+        const s = toUSVString(value);
+        try {
+          if (isImagePreloadLink(this)) {
+            applyPreloadImagesrcset(this, s);
+            return;
+          }
+        } catch {}
+        linkImageSrcsetDesc.set.call(this, s);
+      }
+    });
+  }
+
   // ── Patch Element.prototype.setAttribute for attribute-based assignment ────
   Element.prototype.setAttribute = function(name, value) {
-    // Declared outside the try so the catch handler can inspect it even when
-    // String(name) itself throws (e.g. a Symbol attribute name).
-    let n = "";
-    try {
-      if (destroyed) return setAttr.call(this, name, value);
-      n = String(name).toLowerCase();
+    if (destroyed) return setAttr.call(this, name, value);
 
-      // setAttribute is among the hottest DOM calls on a page. Only seven
-      // attribute names are ever intercepted, so every other call returns
-      // before any instanceof test runs.
-      if (n !== "src" && n !== "srcset" && n !== "loading" && n !== "href" &&
-          n !== "rel" && n !== "as" && n !== "type") {
-        return setAttr.call(this, name, value);
+    // DOMString-convert the name once. Pass the resulting primitive through to
+    // the native method so custom name stringifiers are never invoked twice.
+    const attrName = toDOMString(name);
+    const n = attrName.toLowerCase();
+
+    // setAttribute is among the hottest DOM calls on a page. Only eight
+    // attribute names are intercepted, so unrelated values remain for native
+    // Web IDL conversion and return before any instanceof test runs.
+    if (n !== "src" && n !== "srcset" && n !== "loading" && n !== "href" &&
+        n !== "rel" && n !== "as" && n !== "type" && n !== "imagesrcset") {
+      return setAttr.call(this, attrName, value);
+    }
+
+    // Convert intercepted values before entering fail-open handling. This
+    // preserves the native DOMString TypeError for Symbols rather than
+    // swallowing it or replacing the input with an empty string.
+    if (this instanceof HTMLImageElement && n === "loading") {
+      const v = toDOMString(value).toLowerCase();
+      if (!ready || !opts) {
+        this.dataset.bhPendingLoading = v;
+        pending.add(this);
+        return setAttr.call(this, attrName, "lazy");
       }
+      clearPending(this, "loading");
+      if (!opts.enabled || pageExcluded) return setAttr.call(this, attrName, v);
+      return setAttr.call(this, attrName, v === "eager" ? "eager" : "lazy");
+    }
 
-      // Handle these before the generic src/srcset gate; otherwise the early
-      // return below makes the loading and preload branches unreachable.
-      if (this instanceof HTMLImageElement && n === "loading") {
-        const v = String(value || "").toLowerCase();
-        if (!ready || !opts) {
-          this.dataset.bhPendingLoading = v;
-          pending.add(this);
-          return setAttr.call(this, "loading", "lazy");
-        }
-        clearPending(this, "loading");
-        if (!opts.enabled || pageExcluded) return setAttr.call(this, "loading", v);
-        return setAttr.call(this, "loading", v === "eager" ? "eager" : "lazy");
+    if (this instanceof HTMLLinkElement && n === "imagesrcset") {
+      if (isImagePreloadLink(this)) {
+        applyPreloadImagesrcset(this, toDOMString(value));
+        return;
       }
+      return setAttr.call(this, attrName, value);
+    }
 
-      if (this instanceof HTMLLinkElement &&
-          (n === "href" || n === "rel" || n === "as" || n === "type")) {
-        if (n === "href" && isImagePreloadLink(this)) {
-          // Decide before the raw href reaches the browser; setting it first can
-          // start an unoptimized preload before processPreloadLink cancels it.
-          applyPreloadHref(this, String(value));
-          return;
-        }
-
-        if (n !== "href" && willBeImagePreloadLink(this, n, value)) {
-          // A link can receive href before rel/as/type. Rewrite or park its
-          // current href before the attribute makes it an active image preload.
-          const original = this.getAttribute(PENDING_PRELOAD_HREF_ATTR) ||
-            this.getAttribute(ORIGINAL_PRELOAD_HREF_ATTR) || this.getAttribute("href");
-          if (original && original !== "about:blank") applyPreloadHref(this, original);
-        }
-
-        setAttr.call(this, name, value);
-        processPreloadLink(this);
+    if (this instanceof HTMLLinkElement &&
+        (n === "href" || n === "rel" || n === "as" || n === "type")) {
+      const incoming = toDOMString(value);
+      if (n === "href" && isImagePreloadLink(this)) {
+        // Decide before the raw href reaches the browser; setting it first can
+        // start an unoptimized preload before processPreloadLink cancels it.
+        applyPreloadHref(this, incoming);
         return;
       }
 
-      // Remaining names: only src/srcset on <img>/<source> are intercepted
-      // (loading and link attributes were fully handled above).
-      if (n !== "src" && n !== "srcset") return setAttr.call(this, name, value);
-      if (this instanceof HTMLImageElement) {
-        const incoming = String(value);
-        const restored = restoredAssignment(this, n, incoming);
-        if (restored === "ignore") return;
-        if (restored === "keep") return setAttr.call(this, name, value);
-        if (n === "src") {
-          const original = incoming;
-          const decided = decideUrl(original, this);
-          if (decided === null) {
-            this.dataset.bhPendingSrc = original;
-            pending.add(this);
-            return setAttr.call(this, "src", "about:blank");
-          }
-          clearPending(this, "src");
-          if (decided !== original) rememberResolvedOriginal(this, original);
-          return setAttr.call(this, "src", decided);
-        } else if (n === "srcset") {
-          if (!ready || !opts) {
-            this.dataset.bhPendingSrcset = incoming;
-            pending.add(this);
-            return setAttr.call(this, "srcset", "");
-          }
-          clearPending(this, "srcset");
-          if (!opts.enabled) return setAttr.call(this, "srcset", incoming);
-          return setAttr.call(this, "srcset", rewriteSrcset(incoming, this));
-        }
+      if (n !== "href") {
+        try { preparePreloadActivation(this, n, incoming); } catch {}
       }
-      if (this instanceof HTMLSourceElement) {
-        // Non-picture <source> elements are media sources. Pass them through
-        // before the settings gate so their values are never parked/blanked.
-        if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
-          clearPending(this, n);
-          return setAttr.call(this, name, value);
-        }
+      setAttr.call(this, attrName, incoming);
+      processPreloadLink(this);
+      return;
+    }
 
-        const incoming = String(value);
+    // Remaining names: only src/srcset on <img>/<source> are intercepted
+    // (loading and link attributes were fully handled above).
+    if (n !== "src" && n !== "srcset") return setAttr.call(this, attrName, value);
+    if (this instanceof HTMLImageElement) {
+      const incoming = toDOMString(value);
+      try {
         const restored = restoredAssignment(this, n, incoming);
         if (restored === "ignore") return;
-        if (restored === "keep") return setAttr.call(this, name, value);
-
+        if (restored === "keep") return setAttr.call(this, attrName, incoming);
         if (n === "src") {
-          const original = incoming;
-          const decided = decideUrl(original, this);
+          const decided = decideUrl(incoming, this);
           if (decided === null) {
-            this.dataset.bhPendingSrc = original;
+            this.dataset.bhPendingSrc = incoming;
             pending.add(this);
-            return setAttr.call(this, "src", "about:blank");
+            return setAttr.call(this, attrName, "about:blank");
           }
           clearPending(this, "src");
-          if (decided !== original) rememberResolvedOriginal(this, original);
-          return setAttr.call(this, "src", decided);
+          if (decided !== incoming) rememberResolvedOriginal(this, incoming);
+          return setAttr.call(this, attrName, decided);
+        }
+        if (!ready || !opts) {
+          this.dataset.bhPendingSrcset = incoming;
+          pending.add(this);
+          return setAttr.call(this, attrName, "");
+        }
+        clearPending(this, "srcset");
+        if (!opts.enabled) return setAttr.call(this, attrName, incoming);
+        return setAttr.call(this, attrName, rewriteSrcset(incoming, this));
+      } catch (error) {
+        // If an eligible image rewrite unexpectedly fails, do not fall through
+        // to the original HTTP(S) value while protection is active. Conversion
+        // errors have already happened above and still propagate natively.
+        if (ready && opts?.enabled) {
+          if (n === "src" || n === "srcset") clearPending(this, n);
+          if (n === "src") return setAttr.call(this, attrName, "about:blank");
+          return setAttr.call(this, attrName, "");
+        }
+        throw error;
+      }
+    }
+
+    if (this instanceof HTMLSourceElement) {
+      // Non-picture <source> elements are media sources. Pass them through
+      // before conversion/parking so their values are never intercepted.
+      if (!(this.parentElement && this.parentElement.tagName === "PICTURE")) {
+        const passthrough = toDOMString(value);
+        clearPending(this, n);
+        return setAttr.call(this, attrName, passthrough);
+      }
+
+      const incoming = toDOMString(value);
+      try {
+        const restored = restoredAssignment(this, n, incoming);
+        if (restored === "ignore") return;
+        if (restored === "keep") return setAttr.call(this, attrName, incoming);
+
+        if (n === "src") {
+          const decided = decideUrl(incoming, this);
+          if (decided === null) {
+            this.dataset.bhPendingSrc = incoming;
+            pending.add(this);
+            return setAttr.call(this, attrName, "about:blank");
+          }
+          clearPending(this, "src");
+          if (decided !== incoming) rememberResolvedOriginal(this, incoming);
+          return setAttr.call(this, attrName, decided);
         }
 
         if (!ready || !opts) {
           this.dataset.bhPendingSrcset = incoming;
           pending.add(this);
-          return setAttr.call(this, "srcset", "");
+          return setAttr.call(this, attrName, "");
         }
         clearPending(this, "srcset");
-        if (!opts.enabled) return setAttr.call(this, "srcset", incoming);
-        return setAttr.call(this, "srcset", rewriteSrcset(incoming, this));
+        if (!opts.enabled) return setAttr.call(this, attrName, incoming);
+        return setAttr.call(this, attrName, rewriteSrcset(incoming, this));
+      } catch (error) {
+        const protectedPictureSource =
+          this.parentElement?.tagName === "PICTURE" && (n === "src" || n === "srcset");
+        if (ready && opts?.enabled && protectedPictureSource) {
+          clearPending(this, n);
+          if (n === "src") return setAttr.call(this, attrName, "about:blank");
+          return setAttr.call(this, attrName, "");
+        }
+        throw error;
       }
-    } catch (error) {
-      // If an eligible image rewrite unexpectedly fails, do not fall through to
-      // the original HTTP(S) value while protection is active.
-      const protectedPictureSource =
-        this instanceof HTMLSourceElement &&
-        this.parentElement?.tagName === "PICTURE" &&
-        (n === "src" || n === "srcset");
-      if (ready && opts?.enabled &&
-          (this instanceof HTMLImageElement || protectedPictureSource)) {
-        if (n === "src" || n === "srcset") clearPending(this, n);
-        // Only src/srcset carry source URLs. Other intercepted names (loading,
-        // link href/rel/as/type) must not be blanked; rethrow below so the page
-        // observes the same failure the native setter would produce.
-        if (n === "src") return setAttr.call(this, "src", "about:blank");
-        if (n === "srcset") return setAttr.call(this, "srcset", "");
-      }
-      throw error;
     }
-    return setAttr.call(this, name, value);
+
+    return setAttr.call(this, attrName, value);
   };
 
-  // ── MutationObserver for <link rel="preload" as="image"> ──────────────────
+  // ── MutationObserver for image preload links ───────────────────────────────
   // The HTML parser sets attributes natively, bypassing our JS patches. Watch
-  // for link elements added to the DOM and for rel/as/href/type changes.
+  // for inserted links and rel/as/type/href/imagesrcset changes.
   preloadObserver = new MutationObserver(mutations => {
     if (destroyed) return;
     for (const m of mutations) {
@@ -897,7 +1150,7 @@
     childList: true,
     subtree: true,
     attributes: true,
-    attributeFilter: ["href", "rel", "as", "type"]
+    attributeFilter: ["href", "rel", "as", "type", "imagesrcset"]
   });
 
   // Free the outgoing page immediately on normal navigation. Skip persisted

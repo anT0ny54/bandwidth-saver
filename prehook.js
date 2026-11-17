@@ -57,12 +57,23 @@
   const safeURL = (u, base = document.baseURI) => {
     try { return new URL(u, base); } catch { return null; }
   };
+  // Reduces one exclusion entry to the bare hostname that page hosts are matched
+  // against. Optional scheme and path, a leading "*." or dots, and trailing dots
+  // are dropped. Internationalized names are converted to their ASCII (punycode)
+  // form, because location.hostname and DNR use that form.
+  // KEEP IN SYNC across defaults.js, content.js, prehook.js and service-worker.js.
+  function normalizeDomainToken(token) {
+    const host = String(token).toLowerCase()
+      .replace(/^https?:\/\//, "").split("/")[0]
+      .replace(/^(?:\*\.|\.+)/, "").replace(/\.+$/, "");
+    if (!host) return "";
+    try { return new URL("http://" + host).hostname.replace(/\.+$/, ""); }
+    catch { return host; }
+  }
   const toDomainSet = text => new Set(
     String(text || "")
       .split(/[\s,]+/)
-      .map(s => s.toLowerCase())
-      .filter(Boolean)
-      .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
+      .map(normalizeDomainToken)
       .filter(Boolean)
   );
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
@@ -422,15 +433,18 @@
 
   // Spec-style srcset parser: a comma inside a URL (e.g. Cloudinary "w_400,h_300")
   // is part of the URL; only trailing commas or a comma after descriptors end a candidate.
+  // HTML srcset separators are ASCII whitespace and commas only.
+  const isSrcsetSpace = c => c === 9 || c === 10 || c === 12 || c === 13 || c === 32;
+  const isSrcsetSeparator = c => c === 44 || isSrcsetSpace(c);
   function parseSrcset(ss) {
     const out = [];
     const n = ss.length;
     let i = 0;
     while (i < n) {
-      while (i < n && /[\s,]/.test(ss[i])) i++;
+      while (i < n && isSrcsetSeparator(ss.charCodeAt(i))) i++;
       if (i >= n) break;
       const s = i;
-      while (i < n && !/\s/.test(ss[i])) i++;
+      while (i < n && !isSrcsetSpace(ss.charCodeAt(i))) i++;
       let url = ss.slice(s, i);
       let desc = "";
       if (url.endsWith(",")) {

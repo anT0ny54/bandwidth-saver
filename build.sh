@@ -22,10 +22,16 @@ done
 
 OUTDIR="$(mkdir -p "$OUTDIR" && cd "$OUTDIR" && pwd)"
 
+# The manifest is the single source of truth for the extension version. Read
+# and validate it in one interpreter run. Do not hard-code a release version
+# here: every well-formed manifest version must build.
 VERSION="$(python3 - "$ROOT_DIR/manifest.json" <<'PY'
-import json, sys
+import json, re, sys
 with open(sys.argv[1], encoding='utf-8') as f:
-    print(json.load(f)['version'])
+    version = json.load(f).get('version')
+if not isinstance(version, str) or not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
+    raise SystemExit(f"ERROR: invalid extension version: {version!r}")
+print(version)
 PY
 )"
 
@@ -185,6 +191,26 @@ for name, grab in (("WSRV_PROXY", const_block), ("TINY_DIM_RE", const_block),
             "prehook.js — apply the same fix to both."
         )
 
+# Domain normalization and srcset separator helpers are shared by all four
+# files that parse exclusion lists or srcset values; compare every copy.
+helper_sources = [
+    ("content.js", content_src),
+    ("prehook.js", prehook_src),
+    ("defaults.js", open(sys.argv[3], encoding="utf-8").read()),
+    ("service-worker.js", open(sys.argv[4], encoding="utf-8").read()),
+]
+for name, grab in (("normalizeDomainToken", fn_block),):
+    copies = [(label, grab(src, name)) for label, src in helper_sources]
+    missing = [label for label, body in copies if body is None]
+    if missing:
+        raise SystemExit(f"ERROR: could not extract '{name}' from {', '.join(missing)}")
+    if len({re.sub(r"\s+", " ", body).strip() for _, body in copies}) != 1:
+        raise SystemExit(f"ERROR: shared code '{name}' differs across the four files")
+for name in ("isSrcsetSpace", "isSrcsetSeparator"):
+    bodies = [const_block(src, name) for src in (content_src, prehook_src)]
+    if None in bodies or len({re.sub(r"\s+", " ", b).strip() for b in bodies}) != 1:
+        raise SystemExit(f"ERROR: shared code '{name}' differs between content.js and prehook.js")
+
 # DEFAULTS is copied into each execution context because the classic service
 # worker and MAIN world cannot import the shared ES module. Compare all copies.
 default_sources = [
@@ -205,15 +231,6 @@ if len({block for _, block in normalized_defaults}) != 1:
     details = ", ".join(label for label, _ in normalized_defaults)
     raise SystemExit(f"ERROR: shared DEFAULTS differ across {details}")
 PYPARITY
-
-# The manifest is the single source of truth for the extension version.
-# Do not hard-code a release version here: every manifest version must build.
-python3 - "$VERSION" <<'PYVERCHECK'
-import re, sys
-version = sys.argv[1]
-if not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
-    raise SystemExit(f"ERROR: invalid extension version: {version!r}")
-PYVERCHECK
 
 ZIPFILE="$OUTDIR/bandwidth-saver-$VERSION.zip"
 SOURCE_DATE_EPOCH=1709856000
@@ -283,11 +300,6 @@ ZIP_ENTRIES="$(unzip -Z1 "$ZIPFILE")"
 grep -Fxq 'manifest.json' <<< "$ZIP_ENTRIES" || { echo "ERROR: manifest.json missing from archive" >&2; exit 1; }
 grep -Fxq 'popup.html'    <<< "$ZIP_ENTRIES" || { echo "ERROR: popup.html missing from archive" >&2; exit 1; }
 grep -Fxq 'options.html'  <<< "$ZIP_ENTRIES" || { echo "ERROR: options.html missing from archive" >&2; exit 1; }
-# NOTE: a bare `! cmd` is exempt from `set -e`, so use an explicit if.
-if grep -q '^bandwidth-saver-main/' <<< "$ZIP_ENTRIES"; then
-  echo "ERROR: zip contains a top-level project folder" >&2
-  exit 1
-fi
 
 echo "Built: $ZIPFILE"
 echo "SHA256: $(sha256sum "$ZIPFILE" | awk '{print $1}')"

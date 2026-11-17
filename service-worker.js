@@ -40,6 +40,20 @@ const RULE_ID_SAVEDATA  = 3;  // sends Save-Data: on to compatible subresource/f
 const RULE_ID_SAVEDATA_DOC = 4; // same header for top-level navigations (see doRefreshRules)
 const ALL_RULE_IDS     = [RULE_ID_REDIRECT, RULE_ID_CSP, RULE_ID_SAVEDATA, RULE_ID_SAVEDATA_DOC];
 
+// Reduces one exclusion entry to the bare hostname that page hosts are matched
+// against. Optional scheme and path, a leading "*." or dots, and trailing dots
+// are dropped. Internationalized names are converted to their ASCII (punycode)
+// form, because location.hostname and DNR use that form.
+// KEEP IN SYNC across defaults.js, content.js, prehook.js and service-worker.js.
+function normalizeDomainToken(token) {
+  const host = String(token).toLowerCase()
+    .replace(/^https?:\/\//, "").split("/")[0]
+    .replace(/^(?:\*\.|\.+)/, "").replace(/\.+$/, "");
+  if (!host) return "";
+  try { return new URL("http://" + host).hostname.replace(/\.+$/, ""); }
+  catch { return host; }
+}
+
 // Stable serialization (sorted object keys). Used to decide whether a settings
 // mirror or a DNR ruleset actually changed before writing it again.
 function canonicalJson(value) {
@@ -529,7 +543,7 @@ function doRefreshRules(finish, generation) {
         // Excluded sites are never proxied, so they keep their own CSP. DNR rejects the
         // whole update on an invalid domain, so only well-formed hostnames are passed.
         const excluded = String(opts.excludeDomains || "").split(/[,\s]+/)
-          .map(function(s) { return s.toLowerCase().replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""); })
+          .map(normalizeDomainToken)
           .filter(function(s) { return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(s); });
         const excludedDomainList = Array.from(new Set(excluded));
         const cspCondition = { resourceTypes: ["main_frame", "sub_frame"] };

@@ -128,12 +128,23 @@
   const TINY_DIM_RE = /(?:[?&](?:w|width|h|height)=)(?:[0-9]|[12][0-9]|3[0-2])(?:[&#]|$)/i;
   const isTiny = u => TINY_DIM_RE.test(u);
 
+  // Reduces one exclusion entry to the bare hostname that page hosts are matched
+  // against. Optional scheme and path, a leading "*." or dots, and trailing dots
+  // are dropped. Internationalized names are converted to their ASCII (punycode)
+  // form, because location.hostname and DNR use that form.
+  // KEEP IN SYNC across defaults.js, content.js, prehook.js and service-worker.js.
+  function normalizeDomainToken(token) {
+    const host = String(token).toLowerCase()
+      .replace(/^https?:\/\//, "").split("/")[0]
+      .replace(/^(?:\*\.|\.+)/, "").replace(/\.+$/, "");
+    if (!host) return "";
+    try { return new URL("http://" + host).hostname.replace(/\.+$/, ""); }
+    catch { return host; }
+  }
   function domainSet(text) {
     return new Set(
       String(text || "").split(/[,\s]+/)
-        .map(s => s.toLowerCase()).filter(Boolean)
-        .map(s => s.replace(/^https?:\/\//, "").split("/")[0].replace(/^\.+|\.+$/g, ""))
-        .filter(Boolean)
+        .map(normalizeDomainToken).filter(Boolean)
     );
   }
 
@@ -282,15 +293,18 @@
 
   // Spec-style srcset parser (KEEP IN SYNC with prehook.js): commas inside a URL
   // (e.g. Cloudinary "w_400,h_300") belong to the URL, not the candidate list.
+  // HTML srcset separators are ASCII whitespace and commas only.
+  const isSrcsetSpace = c => c === 9 || c === 10 || c === 12 || c === 13 || c === 32;
+  const isSrcsetSeparator = c => c === 44 || isSrcsetSpace(c);
   function parseSrcset(ss) {
     const out = [];
     const n = ss.length;
     let i = 0;
     while (i < n) {
-      while (i < n && /[\s,]/.test(ss[i])) i++;
+      while (i < n && isSrcsetSeparator(ss.charCodeAt(i))) i++;
       if (i >= n) break;
       const s = i;
-      while (i < n && !/\s/.test(ss[i])) i++;
+      while (i < n && !isSrcsetSpace(ss.charCodeAt(i))) i++;
       let url = ss.slice(s, i);
       let desc = "";
       if (url.endsWith(",")) {

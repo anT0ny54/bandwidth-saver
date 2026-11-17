@@ -20,6 +20,8 @@ jobs:
   build:
     name: Build extension
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout
@@ -50,29 +52,23 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Read manifest version
-        id: version
-        shell: bash
-        run: echo "version=$(python3 -c 'import json; print(json.load(open("manifest.json"))["version"])')" >> "$GITHUB_OUTPUT"
-
-      # Reuse the zip the build job already produced (the build is
-      # reproducible) instead of building a second time.
+      # The release job needs no source checkout: the build job's artifact is
+      # the reproducible zip, and its file name carries the manifest version.
+      # Reuse it instead of building again or reading the manifest a second time.
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: bandwidth-saver-${{ steps.version.outputs.version }}
+          name: bandwidth-saver-${{ needs.build.outputs.version }}
           path: dist
 
       - name: Publish manifest version release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
           ZIP="dist/bandwidth-saver-${VERSION}.zip"
+          test -f "$ZIP" || { echo "ERROR: missing $ZIP" >&2; exit 1; }
 
           if gh release view "v${VERSION}" >/dev/null 2>&1; then
             echo "Release v${VERSION} exists; replacing release asset."

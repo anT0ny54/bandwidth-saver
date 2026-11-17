@@ -29,8 +29,20 @@ VERSION="$(python3 - "$ROOT_DIR/manifest.json" <<'PY'
 import json, re, sys
 with open(sys.argv[1], encoding='utf-8') as f:
     version = json.load(f).get('version')
-if not isinstance(version, str) or not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
-    raise SystemExit(f"ERROR: invalid extension version: {version!r}")
+parts = version.split('.') if isinstance(version, str) else []
+valid_parts = (
+    len(parts) == 3
+    and all(
+        re.fullmatch(r"(?:0|[1-9][0-9]*)", part) is not None
+        and int(part) <= 65535
+        for part in parts
+    )
+)
+if not valid_parts:
+    raise SystemExit(
+        f"ERROR: invalid extension version: {version!r}; expected three "
+        "dot-separated integers in the range 0–65535 without leading zeros"
+    )
 print(version)
 PY
 )"

@@ -58,6 +58,11 @@
 
   let opts = null;
   let proxyConfig = null;
+  // Distinguish a defaults failsafe from a complete storage snapshot. Until a
+  // full snapshot arrives, sync change events must not merge partial payloads
+  // over the fallback values and then overwrite the local mirror.
+  let settingsLoadedFromStorage = false;
+  let defaultsFailsafePublished = false;
   // Clamped once per applyOpts(); devicePixelRatio only changes on zoom or
   // monitor moves, so it must not be re-computed on every uncached URL build.
   let dpr = 1;
@@ -74,6 +79,10 @@
   // style attribute value right after our own background rewrite, so the
   // mutation record that write triggers is not re-parsed.
   const ownStyle = new WeakMap();
+  // Keep the original/applied inline background pair so a late real settings
+  // snapshot can rebuild a background URL that the defaults failsafe already
+  // rewrote. The WeakMap does not retain detached elements.
+  const originalBackgrounds = new WeakMap();
   const ORIGINAL_SRC_ATTR = "data-bw-original-src";
   const ORIGINAL_SRCSET_ATTR = "data-bw-original-srcset";
   const ORIGINAL_DATA_SRCSET_ATTR = "data-bw-original-data-srcset";
@@ -334,6 +343,15 @@
   // True when a current srcset is the proxied form of a saved original. This
   // lets a lazy-loader's srcset copy keep its own fallback before a subsequent
   // data-srcset reassignment replaces that attribute's separate original.
+  function proxyUrlMatchesOriginal(proxyValue, originalValue) {
+    const proxy = proxyValue ? resolveImage(proxyValue) : null;
+    const original = originalValue ? resolveImage(originalValue) : null;
+    if (!proxy || proxy.hostname !== proxyHost || !original) return false;
+    const sourceValue = proxy.searchParams.get("url");
+    const source = sourceValue ? resolveImage(sourceValue) : null;
+    return !!source && source.href === original.href;
+  }
+
   function proxySrcsetMatchesOriginal(proxyValue, originalValue) {
     if (!containsProxyUrl(proxyValue, true) || !originalValue) return false;
     const proxies = parseSrcset(proxyValue);
@@ -666,6 +684,12 @@
     // style change arrives as a mutation that deletes the element from
     // doneBg before reprocessing, so marking it done here is safe.
     const bg = el.hasAttribute("style") ? el.style?.backgroundImage : "";
+    const previousBackground = originalBackgrounds.get(el);
+    // Keep the saved source when only an unrelated inline style property
+    // changed. Drop it when the page replaced background-image itself.
+    if (previousBackground && bg !== previousBackground.applied) {
+      originalBackgrounds.delete(el);
+    }
     if (!bg) { doneBg.add(el); return; }
 
     // Rewrite every HTTP(S) url(...) token while preserving gradients, CSS
@@ -683,6 +707,10 @@
     });
     if (touched) {
       el.style.backgroundImage = output;
+      originalBackgrounds.set(el, {
+        original: bg,
+        applied: el.style.backgroundImage
+      });
       ownStyle.set(el, el.getAttribute("style"));
     }
     // Re-mark done either way so unrelated later style mutations don't re-run
@@ -807,7 +835,14 @@
   // saved proxy src/srcset restored before it becomes a media source. Sources
   // outside <picture> are lifecycle-checked only, never rewritten as images.
   // Generic data-* lazy attributes remain excluded from the candidate scan.
-  const CANDIDATE_SELECTOR = ["img", "source", "[style*='url(' i]", 'link[rel~="preload" i]'].join(",");
+  const CANDIDATE_SELECTOR = [
+    "img", "source", "[style*='url(' i]",
+    'link[rel~="preload" i]',
+    "link[data-bw-original-preload-href]",
+    "link[data-bw-original-preload-imagesrcset]",
+    "link[data-bh-preload-href]",
+    "link[data-bh-preload-imagesrcset]"
+  ].join(",");
 
   // True when an attribute value still holds at least one rewriteable image URL.
   // srcset-style values are inspected candidate by candidate: resolving the whole
@@ -883,10 +918,58 @@
     processCandidate(el);
   }
 
-  function rewriteAll(force = false) {
+  // When the defaults failsafe had time to proxy a resource before the real
+  // storage snapshot arrived, its saved original is the only safe basis for
+  // rebuilding the URL with the user's actual quality/width/grayscale/exclusion
+  // settings. Restore only values that still contain the exact proxy URL for
+  // that saved original; newer page assignments are left untouched.
+  function restoreFailsafeRewrite(el) {
+    if (!el || el.nodeType !== 1) return;
+    if ((el.tagName === "IMG" || el.tagName === "SOURCE") &&
+        el.getAttribute(RESTORED_ATTR) !== "1") {
+      const originalSrc = el.getAttribute(ORIGINAL_SRC_ATTR);
+      const currentSrc = el.getAttribute("src");
+      if (originalSrc && proxyUrlMatchesOriginal(currentSrc, originalSrc)) {
+        setIfChanged(el, "src", currentSrc, originalSrc);
+      }
+
+      const originalSrcset = el.getAttribute(ORIGINAL_SRCSET_ATTR);
+      const currentSrcset = el.getAttribute("srcset");
+      if (originalSrcset && proxySrcsetMatchesOriginal(currentSrcset, originalSrcset)) {
+        setIfChanged(el, "srcset", currentSrcset, originalSrcset);
+      }
+
+      const originalDataSrcset = el.getAttribute(ORIGINAL_DATA_SRCSET_ATTR);
+      const currentDataSrcset = el.getAttribute("data-srcset");
+      if (originalDataSrcset &&
+          proxySrcsetMatchesOriginal(currentDataSrcset, originalDataSrcset)) {
+        setIfChanged(el, "data-srcset", currentDataSrcset, originalDataSrcset);
+      }
+
+      const originals = originalLazyAttributes.get(el);
+      if (originals) {
+        for (const [name, original] of originals) {
+          const current = el.getAttribute(name);
+          if (proxyUrlMatchesOriginal(current, original)) {
+            setIfChanged(el, name, current, original);
+          }
+        }
+      }
+    }
+
+    const background = originalBackgrounds.get(el);
+    if (background && el.style?.backgroundImage === background.applied) {
+      el.style.backgroundImage = background.original;
+      originalBackgrounds.delete(el);
+      ownStyle.delete(el);
+    }
+  }
+
+  function rewriteAll(force = false, restoreFallbacks = false) {
     if (destroyed) return;
     const candidates = document.querySelectorAll(CANDIDATE_SELECTOR);
     candidates.forEach(el => {
+      if (restoreFallbacks) restoreFailsafeRewrite(el);
       if (force) {
         // A full reconciliation scan must be able to repair missed mutation
         // records, not just revisit elements already marked as processed.
@@ -905,7 +988,12 @@
   // macrotask fires, so a later snapshot in a different task still schedules
   // its own scan with the newer settings.
   let initialRewriteQueued = false;
-  function scheduleInitialRewrite() {
+  let restoreFailsafeRewritesOnNextScan = false;
+  function scheduleInitialRewrite(restoreFallbacks = false) {
+    // A settings snapshot can arrive while a normal initial scan is already
+    // queued. Preserve the stronger reconciliation request for that scan
+    // rather than losing it to the same-task coalescing guard.
+    if (restoreFallbacks) restoreFailsafeRewritesOnNextScan = true;
     if (destroyed || initialRewriteQueued) return;
     initialRewriteQueued = true;
     // Yield once before a full-page scan so navigation/rendering is not blocked
@@ -913,7 +1001,9 @@
     setTimeout(() => {
       initialRewriteQueued = false;
       if (destroyed) return;
-      rewriteAll(true);
+      const restoreFallbacks = restoreFailsafeRewritesOnNextScan;
+      restoreFailsafeRewritesOnNextScan = false;
+      rewriteAll(true, restoreFallbacks);
     }, 0);
   }
 
@@ -1135,15 +1225,16 @@
   // when a sync/local change arrives before that read completes.
   let settingsReadGeneration = 0;
 
-  function applyInitialSettings(next) {
-    // If the 800 ms failsafe already published DEFAULTS, a late storage snapshot
-    // can carry the real quality/width/exclusion values. Parser-created images
-    // processed with the failsafe config must be reconciled once that snapshot
-    // arrives; merely publishing the settings leaves those URLs unchanged.
-    const hadFailsafe = !!opts;
+  function applyStoredSettings(next) {
+    // If a real storage snapshot supersedes the defaults failsafe, revisit
+    // parser-created resources processed with fallback settings. On an ordinary
+    // first load, applyOpts() already schedules the disabled→enabled scan.
+    const needsReconcile = defaultsFailsafePublished;
     applyOpts(next);
     publishSettings();
-    if (hadFailsafe) scheduleInitialRewrite();
+    settingsLoadedFromStorage = true;
+    defaultsFailsafePublished = false;
+    if (needsReconcile) scheduleInitialRewrite(true);
   }
 
   function readSyncSettings() {
@@ -1153,7 +1244,7 @@
         if (destroyed || generation !== settingsReadGeneration) return;
         const error = chrome.runtime.lastError?.message || "";
         if (error || !synced || typeof synced !== "object") return;
-        applyInitialSettings(synced);
+        applyStoredSettings(synced);
         // Write the fallback mirror so later pages can take the fast path.
         try { chrome.storage.local.set({ bhOpts: opts }); } catch {}
       });
@@ -1165,7 +1256,14 @@
   // would never run and MAIN-world images parked on about:blank would strand.
   setTimeout(() => {
     if (destroyed || opts) return;
-    try { applyOpts(DEFAULTS); publishSettings(); } catch {}
+    try {
+      applyOpts(DEFAULTS);
+      defaultsFailsafePublished = true;
+      publishSettings();
+      // applyOpts() already queues the unknown→enabled initial scan. Keep this
+      // failsafe path to one coalesced request; a later real snapshot upgrades
+      // that scan to restore/rebuild any proxy URLs created with these defaults.
+    } catch {}
   }, 800);
 
   const initialSettingsRead = ++settingsReadGeneration;
@@ -1174,7 +1272,7 @@
       if (destroyed || initialSettingsRead !== settingsReadGeneration) return;
       const error = chrome.runtime.lastError?.message || "";
       if (!error && d?.bhOpts) {
-        applyInitialSettings(d.bhOpts);
+        applyStoredSettings(d.bhOpts);
       } else {
         readSyncSettings();
       }
@@ -1199,6 +1297,10 @@
       // fallback mirror write; an older sync snapshot must never win later.
       settingsReadGeneration++;
       const next = { ...DEFAULTS, ...(changes.bhOpts.newValue || {}) };
+      if (!settingsLoadedFromStorage) {
+        applyStoredSettings(next);
+        return;
+      }
       if (sameOpts(next, opts)) {
         if (opts) opts.saveData = !!next.saveData;
         return;
@@ -1206,7 +1308,10 @@
       applyOpts(next);
       publishSettings();
     } else if (area === "sync") {
-      if (!opts) {
+      // Until a complete local mirror or sync read has arrived, do not merge a
+      // partial onChanged payload over DEFAULTS/the failsafe snapshot. Read the
+      // full sync object instead so existing custom values cannot be lost.
+      if (!settingsLoadedFromStorage || !opts) {
         readSyncSettings();
         return;
       }

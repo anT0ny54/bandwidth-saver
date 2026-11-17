@@ -119,6 +119,16 @@ function mirrorToLocal() {
   mirroring = true;
   const generation = ++mirrorGeneration;
   let settled = false;
+  let timedOut = false;
+  let timeoutGeneration = 0;
+  const retryAfterLateTimeout = function() {
+    // If this operation alone expired and no newer mirror has taken over,
+    // a callback arriving late proves storage is responding again. Discard
+    // its stale snapshot, but start one fresh read to catch up the mirror.
+    if (timedOut && mirrorGeneration === timeoutGeneration && !mirroring) {
+      mirrorToLocal();
+    }
+  };
   const finish = function() {
     if (settled) return;
     settled = true;
@@ -135,8 +145,13 @@ function mirrorToLocal() {
   const watchdog = setTimeout(function() {
     // Invalidate a sync-read callback that arrives after this timeout so a
     // stale snapshot cannot overwrite a newer local mirror (parity with the
-    // refreshRules watchdog).
-    if (generation === mirrorGeneration) mirrorGeneration++;
+    // refreshRules watchdog). Remember this generation so a late callback can
+    // request one fresh read when no newer mirror has already taken over.
+    if (generation === mirrorGeneration) {
+      mirrorGeneration++;
+      timeoutGeneration = mirrorGeneration;
+      timedOut = true;
+    }
     console.warn("[Bandwidth Saver] Settings mirror timed out; releasing mirror guard.");
     finish();
   }, 5000);
@@ -144,7 +159,10 @@ function mirrorToLocal() {
     chrome.storage.sync.get(DEFAULTS, opts => {
       // A callback can arrive after the watchdog released this operation and
       // a newer mirror has started. Never let that older snapshot overwrite it.
-      if (settled || generation !== mirrorGeneration) return;
+      if (settled || generation !== mirrorGeneration) {
+        retryAfterLateTimeout();
+        return;
+      }
       try {
         const error = chrome.runtime.lastError?.message || "";
         if (error || !opts || typeof opts !== "object") {
@@ -158,7 +176,10 @@ function mirrorToLocal() {
         // webRequest event). Skip the write, and the storage.onChanged
         // broadcast it causes in every open tab, when nothing changed.
         chrome.storage.local.get({ bhOpts: null }, function(current) {
-          if (settled || generation !== mirrorGeneration) return;
+          if (settled || generation !== mirrorGeneration) {
+            retryAfterLateTimeout();
+            return;
+          }
           const readError = chrome.runtime.lastError?.message || "";
           if (!readError && current && canonicalJson(current.bhOpts) === canonicalJson(opts)) {
             finish();
@@ -311,6 +332,7 @@ let statsFlushTimer = null;
 let statsFlushInProgress = false;
 let statsResetPending = false;
 let statsResetWriteInProgress = false;
+let statsResetGeneration = 0;
 let statsResetResponders = [];
 
 function emptyStats() {
@@ -324,41 +346,49 @@ function flushStats() {
   statsFlushInProgress = true;
   const delta = pendingStats;
   pendingStats = emptyStats();
+  const resetGenerationAtStart = statsResetGeneration;
+  let writeStarted = false;
   let settled = false;
 
-  // Watchdog: forks that silently drop storage callbacks would otherwise leave
-  // the flush guard stuck true forever, discarding every later observation.
-  // finish(delta) preserves the batch for a later retry via retryDelta.
+  // A failed read or an explicitly failed write can be retried safely. A write
+  // whose callback merely timed out has an ambiguous outcome: storage may have
+  // committed it already. Replaying that delta would double-count statistics.
+  const retryBatch = function(retryDelta) {
+    if (!retryDelta || resetGenerationAtStart !== statsResetGeneration ||
+        statsResetPending || statsResetWriteInProgress) return;
+    statsFlushFailures++;
+    if (statsFlushFailures < MAX_STATS_FLUSH_FAILURES) {
+      pendingStats.filesProcessed += retryDelta.filesProcessed;
+      pendingStats.bytesProcessed += retryDelta.bytesProcessed;
+      pendingStats.bytesSaved += retryDelta.bytesSaved;
+    } else {
+      console.warn("[Bandwidth Saver] Stats batch dropped after " +
+        MAX_STATS_FLUSH_FAILURES + " failed flush attempts.");
+      statsFlushFailures = 0;
+    }
+  };
+
+  // Watchdog: release the guard if a storage callback is dropped. Before a
+  // write is issued, the batch is safe to retry; after set() is issued, its
+  // result is unknown and retrying could count a committed batch twice.
   const watchdog = setTimeout(function() {
-    console.warn("[Bandwidth Saver] Stats flush timed out; releasing flush guard.");
-    finish(delta);
+    if (writeStarted) {
+      console.warn("[Bandwidth Saver] Stats write timed out; outcome is unknown, so the batch will not be replayed.");
+      finish(null);
+    } else {
+      console.warn("[Bandwidth Saver] Stats read timed out; retaining the batch for retry.");
+      finish(delta);
+    }
   }, 5000);
 
-  const finish = function(retryDelta) {
+  const finish = function(retryDelta, successfulWrite = false) {
     if (settled) return;
     settled = true;
     clearTimeout(watchdog);
     statsFlushInProgress = false;
 
-    if (retryDelta) {
-      // Preserve observations when the write fails outside a reset so a later
-      // flush can retry instead of silently dropping the batch — but only up
-      // to MAX_STATS_FLUSH_FAILURES consecutive attempts, after which the batch
-      // is dropped with one warning instead of retrying every 750 ms forever.
-      // During a reset the batch is discarded by design and must not count.
-      if (!statsResetPending) {
-        statsFlushFailures++;
-        if (statsFlushFailures < MAX_STATS_FLUSH_FAILURES) {
-          pendingStats.filesProcessed += retryDelta.filesProcessed;
-          pendingStats.bytesProcessed += retryDelta.bytesProcessed;
-          pendingStats.bytesSaved += retryDelta.bytesSaved;
-        } else {
-          console.warn("[Bandwidth Saver] Stats batch dropped after " +
-            MAX_STATS_FLUSH_FAILURES + " failed flush attempts.");
-          statsFlushFailures = 0;
-        }
-      }
-    } else {
+    if (retryDelta) retryBatch(retryDelta);
+    else if (successfulWrite && resetGenerationAtStart === statsResetGeneration) {
       statsFlushFailures = 0;
     }
 
@@ -370,8 +400,8 @@ function flushStats() {
   };
 
   const persist = function(d) {
-    // The watchdog already returned this batch to pendingStats; writing it
-    // now as well would count the same observations twice.
+    // A late stats-read callback must not start a write after its watchdog
+    // already returned this batch to pendingStats for a fresh read.
     if (settled) return;
     try {
       // A failed read must not fall through to a write: persisting just this
@@ -402,10 +432,22 @@ function flushStats() {
       s.filesProcessed += delta.filesProcessed;
       s.bytesProcessed += delta.bytesProcessed;
       s.bytesSaved += delta.bytesSaved;
+      writeStarted = true;
       chrome.storage.local.set({ stats: s }, () => {
         const error = chrome.runtime.lastError?.message || "";
         if (error) console.warn("[Bandwidth Saver] Failed to flush stats:", error);
-        finish(error ? delta : null);
+        if (settled) {
+          // The watchdog already released the guard. A late explicit failure
+          // is safe to retry only if no reset has superseded this old batch.
+          if (error) {
+            retryBatch(delta);
+            if (pendingStats.filesProcessed) scheduleStatsFlush();
+          } else if (resetGenerationAtStart === statsResetGeneration) {
+            statsFlushFailures = 0;
+          }
+          return;
+        }
+        finish(error ? delta : null, !error);
       });
     } catch (error) {
       console.warn("[Bandwidth Saver] Failed to flush stats:", error);
@@ -480,6 +522,7 @@ function startStatsReset() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "BW_RESET_STATS") return;
 
+  statsResetGeneration++;
   pendingStats = emptyStats();
   if (statsFlushTimer) {
     clearTimeout(statsFlushTimer);
@@ -527,7 +570,7 @@ function doRefreshRules(finish, generation) {
     chrome.storage.sync.get(DEFAULTS, function(rawOpts) {
       // A delayed read must not apply an obsolete ruleset after the watchdog
       // has allowed a newer refresh to run.
-      if (generation !== refreshGeneration) { finish(); return; }
+      if (generation !== refreshGeneration) { releaseStaleRefresh(finish); return; }
       const storageError = chrome.runtime.lastError?.message || "";
       if (storageError) {
         console.warn("[Bandwidth Saver] Failed to read settings for DNR rules:", storageError);

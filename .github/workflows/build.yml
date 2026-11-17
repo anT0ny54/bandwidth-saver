@@ -55,6 +55,8 @@ jobs:
       # The release job needs no source checkout: the build job's artifact is
       # the reproducible zip, and its file name carries the manifest version.
       # Reuse it instead of building again or reading the manifest a second time.
+      - name: Checkout
+  uses: actions/checkout@v5
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
